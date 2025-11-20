@@ -1,0 +1,5 @@
+{
+  "name": "牛頭王",
+  "description": "A multiplayer card game implementation of 6 Nimmt! (牛頭王) with a custom differential scoring system. Play against AI opponents powered by Gemini.",
+  "requestFramePermissions": []
+}
