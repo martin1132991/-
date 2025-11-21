@@ -16,10 +16,9 @@ import { audioService } from './services/audioService';
 import { firebaseService } from './services/firebaseService';
 import { 
   Copy, Play, Users, Volume2, VolumeX, Zap, LogOut, Loader, PlayCircle,
-  MessageSquare, Send, Smile, X, Check, RefreshCcw, Clock, AlarmClock, Trophy, User
+  MessageSquare, Send, Smile, X, Check, RefreshCcw, Clock, AlarmClock, Trophy, User, ThumbsUp, ThumbsDown
 } from 'lucide-react';
 
-const MAX_ROUNDS = 10;
 const HAND_SIZE = 10;
 
 const PRESET_REACTIONS = [
@@ -62,6 +61,9 @@ function App() {
       turnDeadline: 0, chatMessages: []
   });
 
+  // Ref for Host Config
+  const hostConfigRef = useRef(hostConfig);
+
   const [myPlayerId, setMyPlayerId] = useState<string>(() => {
       const saved = localStorage.getItem('cow_king_pid');
       return saved || "";
@@ -87,6 +89,11 @@ function App() {
           resolvingIndex, userMessage, votes, takingRowIndex, turnDeadline, chatMessages
       };
   }, [players, rows, phase, currentRound, activePlayerId, turnCards, resolvingIndex, userMessage, votes, takingRowIndex, turnDeadline, chatMessages]);
+
+  // Sync Config Ref
+  useEffect(() => {
+      hostConfigRef.current = hostConfig;
+  }, [hostConfig]);
 
   // --- Game Logic ---
 
@@ -123,51 +130,63 @@ function App() {
     };
   }, [turnDeadline, phase]);
 
-  const startRound = () => {
-    let currentPlayers = [...players];
-    const totalNeeded = hostConfig.totalPlayers;
+  const startRound = (
+      inputPlayers: Player[] = players, 
+      config = hostConfig
+  ) => {
+    let currentPlayers = [...inputPlayers];
+    const totalNeeded = config.totalPlayers;
     
-    if (networkMode === NetworkMode.LOCAL) {
-        const humansNeeded = Math.min(hostConfig.localHumans, totalNeeded);
-        const botsNeeded = totalNeeded - humansNeeded;
-        currentPlayers = [];
-        
-        for(let i=0; i<humansNeeded; i++) {
-            currentPlayers.push({
-                id: i===0 ? myPlayerId || 'p1' : `p${i+1}`,
-                name: i===0 ? myName : `Player ${i+1}`,
-                type: PlayerType.HUMAN,
-                hand: [], collectedCards: [], scoreHistory: [], totalScore: 0, selectedCard: null, isReady: false
-            });
-        }
-        for(let i=0; i<botsNeeded; i++) {
-            currentPlayers.push({
-                id: `bot-${i}`,
-                name: `Bot ${i+1}`,
-                type: PlayerType.BOT,
-                hand: [], collectedCards: [], scoreHistory: [], totalScore: 0, selectedCard: null, isReady: false
-            });
-        }
-    } else if (networkMode === NetworkMode.HOST) {
-        const existingCount = currentPlayers.length;
-        const botsNeeded = Math.max(0, totalNeeded - existingCount);
-        for(let i=0; i<botsNeeded; i++) {
-            currentPlayers.push({
-                id: `bot-${Date.now()}-${i}`,
-                name: `Bot ${i+1}`,
-                type: PlayerType.BOT,
-                hand: [], collectedCards: [], scoreHistory: [], totalScore: 0, selectedCard: null, isReady: false
-            });
+    // INITIALIZE PLAYERS only if this is the start of a game or players array is empty/incomplete
+    const needsInitialization = currentPlayers.length === 0 || (networkMode === NetworkMode.HOST && currentPlayers.length < totalNeeded && currentRound === 1);
+
+    if (needsInitialization) {
+        if (networkMode === NetworkMode.LOCAL) {
+            const humansNeeded = Math.min(config.localHumans, totalNeeded);
+            const botsNeeded = totalNeeded - humansNeeded;
+            currentPlayers = [];
+            
+            for(let i=0; i<humansNeeded; i++) {
+                currentPlayers.push({
+                    id: i===0 ? myPlayerId || 'p1' : `p${i+1}`,
+                    name: i===0 ? myName : `Player ${i+1}`,
+                    type: PlayerType.HUMAN,
+                    hand: [], collectedCards: [], scoreHistory: [], totalScore: 0, selectedCard: null, isReady: false
+                });
+            }
+            for(let i=0; i<botsNeeded; i++) {
+                currentPlayers.push({
+                    id: `bot-${i}`,
+                    name: `Bot ${i+1}`,
+                    type: PlayerType.BOT,
+                    hand: [], collectedCards: [], scoreHistory: [], totalScore: 0, selectedCard: null, isReady: false
+                });
+            }
+        } else if (networkMode === NetworkMode.HOST) {
+            // Host Online: Fill remaining slots with bots if needed
+            const existingCount = currentPlayers.length;
+            const botsNeeded = Math.max(0, totalNeeded - existingCount);
+            for(let i=0; i<botsNeeded; i++) {
+                currentPlayers.push({
+                    id: `bot-${Date.now()}-${i}`,
+                    name: `Bot ${i+1}`,
+                    type: PlayerType.BOT,
+                    hand: [], collectedCards: [], scoreHistory: [], totalScore: 0, selectedCard: null, isReady: false
+                });
+            }
         }
     }
 
     const deck = shuffleDeck(generateDeck());
+    
+    // PRESERVE SCORES: Map over currentPlayers and only reset round-specific data
     const newPlayers = currentPlayers.map(p => ({
       ...p,
       hand: deck.splice(0, HAND_SIZE).sort((a, b) => a.id - b.id),
-      collectedCards: [],
+      collectedCards: [], // Clear collected for new round
       selectedCard: null,
       isReady: false
+      // NOTE: scoreHistory and totalScore are PRESERVED here
     }));
 
     const newRows: GameRow[] = [];
@@ -182,7 +201,7 @@ function App() {
     setPhase(GamePhase.PLAYER_CHOICE);
     setIsScoreBoardOpen(false);
     setVotes({});
-    setTurnDeadline(hostConfig.turnDuration > 0 ? Date.now() + (hostConfig.turnDuration * 1000) : 0); 
+    setTurnDeadline(config.turnDuration > 0 ? Date.now() + (config.turnDuration * 1000) : 0); 
     thinkingBotsRef.current.clear();
     
     audioService.playFanfare();
@@ -237,16 +256,16 @@ function App() {
       setPlayers(updatedPlayers);
   };
 
-  const checkAllPlayersSelected = (currentPlayers: Player[]) => {
+  const checkAllPlayersSelected = (currentPlayers: Player[], currentRows: GameRow[] = rows) => {
     const allSelected = currentPlayers.every(p => !!p.selectedCard && p.isReady);
     if (allSelected) {
-       revealCards(currentPlayers);
+       revealCards(currentPlayers, currentRows);
     }
   };
 
-  const revealCards = async (currentPlayers: Player[]) => {
+  const revealCards = async (currentPlayers: Player[], currentRows: GameRow[] = rows) => {
     setPhase(GamePhase.REVEAL);
-    setTurnDeadline(0); // Clear timer during reveal
+    setTurnDeadline(0); 
     thinkingBotsRef.current.clear();
     audioService.playAlert();
 
@@ -266,7 +285,8 @@ function App() {
     setPlayers(playersWithoutCards);
 
     if (networkMode === NetworkMode.HOST) {
-       syncState(playersWithoutCards, rows, GamePhase.REVEAL, turns);
+       // PASS currentRows explicitly to avoid stale state
+       syncState(playersWithoutCards, currentRows, GamePhase.REVEAL, turns);
     }
 
     setTimeout(() => {
@@ -288,7 +308,7 @@ function App() {
   ) => {
     if (index >= turns.length) {
       if (currentPlayers[0].hand.length === 0) {
-        calculateScoresAndNextRound();
+        calculateScoresAndNextRound(currentPlayers, currentRows);
       } else {
         setPhase(GamePhase.PLAYER_CHOICE);
         setTurnCards([]);
@@ -425,9 +445,9 @@ function App() {
     });
   };
 
-  const calculateScoresAndNextRound = () => {
-    const playersWithScores = players.map(p => {
-      const roundScore = calculateRoundScore(p, players);
+  const calculateScoresAndNextRound = (currentPlayers: Player[] = players, currentRows: GameRow[] = rows) => {
+    const playersWithScores = currentPlayers.map(p => {
+      const roundScore = calculateRoundScore(p, currentPlayers);
       const collected = p.collectedCards || [];
       return {
         ...p,
@@ -443,7 +463,7 @@ function App() {
     setTurnDeadline(0); 
     
     if (networkMode === NetworkMode.HOST) {
-        syncState(playersWithScores, rows, GamePhase.ROUND_VOTING);
+        syncState(playersWithScores, currentRows, GamePhase.ROUND_VOTING);
     }
   };
   
@@ -457,6 +477,7 @@ function App() {
             startRound();
         } else {
             setPhase(GamePhase.GAME_END);
+            setIsScoreBoardOpen(true);
         }
     } else if (networkMode === NetworkMode.CLIENT) {
         firebaseService.sendAction(roomId, {
@@ -478,7 +499,6 @@ function App() {
       timestamp: Date.now()
     };
     
-    // Keep only last 7 messages locally immediately
     const updatedMessages = [...chatMessages, newMsg].slice(-7);
     setChatMessages(updatedMessages);
     setIsChatOpen(false);
@@ -489,25 +509,23 @@ function App() {
             payload: { content, type, playerId: myPlayerId }
         });
     } else if (networkMode === NetworkMode.HOST) {
-        // Host adds to sync state directly
         syncState(players, rows, phase, turnCards, resolvingIndex, activePlayerId, updatedMessages);
     }
   };
 
   // --- Timer Enforcement (Host Only) ---
   useEffect(() => {
-    if (networkMode === NetworkMode.CLIENT) return; // Only Host enforces timer
+    if (networkMode === NetworkMode.CLIENT) return; 
     if (turnDeadline <= 0) return;
 
     const checkTimer = setInterval(() => {
         if (Date.now() > turnDeadline) {
-            setTurnDeadline(0); // Stop checking immediately
+            setTurnDeadline(0); 
 
             // Use REF for current state to avoid stale closures
             const currentPlayers = gameStateRef.current.players;
             const currentPhase = gameStateRef.current.phase;
 
-            // PHASE: PLAYER CHOICE
             if (currentPhase === GamePhase.PLAYER_CHOICE) {
                 setPlayers(prev => {
                    let changed = false;
@@ -520,13 +538,13 @@ function App() {
                        return p;
                    });
                    if (changed) {
-                       checkAllPlayersSelected(updated);
-                       if (networkMode === NetworkMode.HOST) syncState(updated);
+                       // Use fresh rows from ref
+                       checkAllPlayersSelected(updated, gameStateRef.current.rows);
+                       if (networkMode === NetworkMode.HOST) syncState(updated, gameStateRef.current.rows);
                    }
                    return updated;
                 });
             } 
-            // PHASE: CHOOSING ROW - Force random selection
             else if (currentPhase === GamePhase.CHOOSING_ROW) {
                 const randomRowIndex = Math.floor(Math.random() * 4);
                 handleRowSelect(randomRowIndex);
@@ -540,7 +558,6 @@ function App() {
   useEffect(() => {
     if (networkMode === NetworkMode.CLIENT) return;
 
-    // Bot Card Choice
     if (phase === GamePhase.PLAYER_CHOICE) {
         const botsToMove = players.filter(p => 
             p.type === PlayerType.BOT && !p.isReady && !thinkingBotsRef.current.has(p.id)
@@ -556,7 +573,11 @@ function App() {
                 if (idx === -1 || prev[idx].isReady) return prev;
                 const newPlayers = [...prev];
                 newPlayers[idx] = { ...newPlayers[idx], selectedCard: card, isReady: true };
-                if (networkMode === NetworkMode.LOCAL || networkMode === NetworkMode.HOST) checkAllPlayersSelected(newPlayers);
+                
+                if (networkMode === NetworkMode.LOCAL || networkMode === NetworkMode.HOST) {
+                    // Use fresh rows ref to avoid syncing stale state
+                    checkAllPlayersSelected(newPlayers, gameStateRef.current.rows);
+                }
                 return newPlayers;
             });
         });
@@ -582,43 +603,53 @@ function App() {
       firebaseService.updateGameState(roomId, state);
   };
 
-  // Host Logic - FIXED to prevent duplicate listeners
+  // Host Logic - FIXED to use fresh state from ref
   useEffect(() => {
     if (networkMode === NetworkMode.HOST && roomId) {
-        console.log("Host subscribing to actions...");
         const unsubscribe = firebaseService.subscribeToActions(roomId, (msg) => {
-            // Use REF to get latest state inside the callback without re-subscribing
+            // Get fresh state from Ref
             const cur = gameStateRef.current;
+            const curConfig = hostConfigRef.current;
             
             if (msg.type === 'ACTION_SELECT_CARD') {
                 setPlayers(prev => {
                     const updated = prev.map(p => p.id === msg.payload.playerId ? { ...p, selectedCard: msg.payload.card, isReady: true } : p);
-                    checkAllPlayersSelected(updated);
+                    // PASS FRESH ROWS explicitly
+                    checkAllPlayersSelected(updated, cur.rows);
                     return updated;
                 });
             } else if (msg.type === 'ACTION_SELECT_ROW') {
-                handleRowSelect(msg.payload.rowIndex);
+                // PASS FRESH STATE explicitly to handle logic
+                handleRowSelect(
+                    msg.payload.rowIndex, 
+                    cur.players, 
+                    cur.rows, 
+                    cur.turnCards, 
+                    cur.resolvingIndex
+                );
             } else if (msg.type === 'ACTION_VOTE_NEXT_ROUND') {
                 setVotes(prev => {
                    const newVotes = { ...prev, [msg.payload.playerId]: msg.payload.vote };
                    
-                   // Check if anyone voted NO -> Game Over
+                   // ANY NO -> GAME END
                    if (msg.payload.vote === false) {
                        setPhase(GamePhase.GAME_END);
                        syncState(cur.players, cur.rows, GamePhase.GAME_END);
+                       setIsScoreBoardOpen(true);
                        return newVotes;
                    }
 
-                   // Check if ALL humans voted YES -> Next Round
+                   // ALL YES -> NEXT ROUND
                    const humans = cur.players.filter(p => p.type === PlayerType.HUMAN);
+                   // Check if all humans have voted (and implicitly YES because we filter NO above)
                    if (humans.every(h => newVotes[h.id] === true)) {
                        setCurrentRound(r => r + 1);
-                       startRound();
+                       // PASS FRESH PLAYERS AND CONFIG to avoid resetting to initial state
+                       startRound(cur.players, curConfig);
                    }
                    return newVotes;
                 });
             } else if (msg.type === 'ACTION_SEND_REACTION') {
-                // Correctly append to CURRENT state history
                 const newMsg: ChatMessage = {
                     id: Math.random().toString(),
                     playerId: msg.payload.playerId,
@@ -628,10 +659,7 @@ function App() {
                     timestamp: Date.now()
                 };
                 const updated = [...cur.chatMessages, newMsg].slice(-7);
-                
-                // Update local state
                 setChatMessages(updated);
-                // Sync global state
                 syncState(cur.players, cur.rows, cur.phase, cur.turnCards, cur.resolvingIndex, cur.activePlayerId, updated);
             } else if (msg.type === 'PLAYER_JOINED') {
                 setPlayers(prev => {
@@ -648,7 +676,7 @@ function App() {
         
         return () => unsubscribe();
     }
-  }, [networkMode, roomId]); // Dependencies minimal -> only runs once when hosting starts
+  }, [networkMode, roomId]);
 
   // Client Logic
   useEffect(() => {
@@ -665,7 +693,7 @@ function App() {
               setTurnDeadline(state.turnDeadline || 0);
               setChatMessages(state.chatMessages || []);
               
-              if (state.phase === GamePhase.ROUND_VOTING) setIsScoreBoardOpen(true);
+              if (state.phase === GamePhase.ROUND_VOTING || state.phase === GamePhase.GAME_END) setIsScoreBoardOpen(true);
               else if (state.phase === GamePhase.PLAYER_CHOICE) setIsScoreBoardOpen(false);
           });
       }
@@ -857,7 +885,7 @@ function App() {
 
                          {networkMode === NetworkMode.HOST && (
                              <button 
-                                 onClick={startRound}
+                                 onClick={() => startRound()}
                                  className="w-full py-3 bg-yellow-600 hover:bg-yellow-500 text-white font-bold rounded-lg animate-pulse"
                              >
                                  Start Game
@@ -869,6 +897,15 @@ function App() {
                      </div>
                  )}
              </div>
+         </div>
+         
+         <div className="fixed bottom-4 text-slate-600 text-xs">
+             Your Name: 
+             <input 
+                className="bg-transparent border-b border-slate-600 text-slate-400 ml-2 focus:outline-none focus:border-slate-400"
+                value={myName}
+                onChange={(e) => setMyName(e.target.value)}
+             />
          </div>
       </div>
     );
@@ -901,7 +938,7 @@ function App() {
           <div className="flex items-center gap-2 sm:gap-4">
              <div className="text-yellow-500 font-black text-xl tracking-tighter hidden sm:block">牛頭王 - 遠離賭博</div>
              <div className="bg-slate-800 px-3 py-1 rounded-full text-xs font-mono text-slate-400 border border-slate-700 flex items-center gap-2">
-                <span>R {currentRound}/{MAX_ROUNDS}</span>
+                <span>R {currentRound}</span>
                 {turnDeadline === 0 && phase === GamePhase.PLAYER_CHOICE && (
                     <span className="text-blue-400 flex items-center gap-1 font-bold"><Clock size={12}/> ∞</span>
                 )}
@@ -1058,7 +1095,7 @@ function App() {
                    ))}
                    {(!myPlayer?.hand || myPlayer.hand.length === 0) && (
                       <div className="text-slate-600 text-sm italic py-8 w-full text-center ml-12">
-                         {phase === GamePhase.LOBBY ? 'Waiting to start...' : 'No cards left'}
+                         {'No cards left'}
                       </div>
                    )}
                 </div>
@@ -1078,7 +1115,7 @@ function App() {
        {phase === GamePhase.ROUND_VOTING && (
            <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-10">
                <button 
-                 onClick={handleVoteNext}
+                 onClick={() => handleVoteNext(true)}
                  disabled={votes[myPlayerId]}
                  className={`
                     px-8 py-3 rounded-full font-bold text-lg shadow-2xl flex items-center gap-2 transition-transform active:scale-95
