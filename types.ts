@@ -1,3 +1,4 @@
+
 export interface CardData {
   id: number; // The number on the card (1-104)
   bullHeads: number; // The penalty points
@@ -23,6 +24,7 @@ export interface Player {
   totalScore: number;
   selectedCard: CardData | null; // Card chosen for the current turn
   isConnected?: boolean; // For multiplayer status
+  isReady?: boolean; // Optional ready state for toggle feature
 }
 
 export interface GameRow {
@@ -64,6 +66,7 @@ export interface GameState {
   resolvingIndex: number;
   userMessage: string;
   votes: Record<string, boolean>;
+  takingRowIndex: number; // Index of the row currently being captured (animation state)
 }
 
 export type NetworkMessage = 
@@ -72,5 +75,6 @@ export type NetworkMessage =
   | { type: 'ACTION_SELECT_CARD'; payload: { card: CardData } }
   | { type: 'ACTION_SELECT_ROW'; payload: { rowIndex: number } }
   | { type: 'ACTION_VOTE_NEXT_ROUND'; payload: { vote: boolean } }
+  | { type: 'ACTION_TOGGLE_READY'; payload: { isReady: boolean } }
   | { type: 'PLAYER_JOINED'; payload: { id: string; name: string } }
   | { type: 'START_GAME'; payload: { config: GameConfig } };

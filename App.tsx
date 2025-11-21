@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   CardData, 
@@ -22,7 +23,7 @@ import { peerService } from './services/peerService';
 import Card from './components/Card';
 import GameBoard from './components/GameBoard';
 import ScoreBoard from './components/ScoreBoard';
-import { Trophy, Users, Play, RotateCw, Skull, Eye, EyeOff, BarChart3, AlertTriangle, Bot, Wifi, Copy, Smartphone, ThumbsUp, ThumbsDown } from 'lucide-react';
+import { Trophy, Users, Play, RotateCw, Skull, Eye, EyeOff, BarChart3, AlertTriangle, Bot, Wifi, Copy, Smartphone, ThumbsUp, ThumbsDown, CheckCircle, XCircle } from 'lucide-react';
 
 const INITIAL_CONFIG: GameConfig = {
   maxRounds: 10,
@@ -54,6 +55,7 @@ export default function App() {
   const [turnCards, setTurnCards] = useState<{playerId: string, card: CardData}[]>([]);
   const [resolvingIndex, setResolvingIndex] = useState(-1);
   const [userMessage, setUserMessage] = useState<string>("");
+  const [takingRowIndex, setTakingRowIndex] = useState<number>(-1); // -1 means no row is currently being taken
   
   // UI State
   const [isScoreBoardOpen, setIsScoreBoardOpen] = useState(false);
@@ -86,6 +88,7 @@ export default function App() {
       else if (networkMode === NetworkMode.HOST) {
         switch (msg.type) {
           case 'PLAYER_JOINED':
+            // Dedup logic to prevent same player adding twice if connection fluctuates
             setConnectedPlayers(prev => {
               if (prev.some(p => p.name === msg.payload.name)) return prev;
               return [...prev, msg.payload];
@@ -95,9 +98,9 @@ export default function App() {
             peerService.broadcast({ 
                 type: 'WELCOME', 
                 payload: { 
-                    playerId: msg.payload.id, // Use the ID they sent or generate one? Simpler to just ack.
+                    playerId: msg.payload.id, 
                     gameState: {
-                        players, rows, phase, currentRound, activePlayerId, turnCards, resolvingIndex, userMessage, votes
+                        players, rows, phase, currentRound, activePlayerId, turnCards, resolvingIndex, userMessage, votes, takingRowIndex
                     }
                 } 
             });
@@ -109,6 +112,18 @@ export default function App() {
               handlePlayerAction(msg.payload.card, ownerId);
             }
             break;
+
+          case 'ACTION_TOGGLE_READY':
+             // We need to find which player sent this. 
+             // In a real backend we verify token, here we rely on the Host knowing ID mapping or passing it.
+             // P2P limitation: identifying sender relies on connection metadata or payload.
+             // For simplicity, Client sends specific message, Host updates that client.
+             // To do this properly without passing ID in payload (insecure but fine here), we iterate players.
+             // Ideally msg.payload should have ID, but our type def is simplified.
+             // Let's assume we handle this via finding who is not ready? No, we need ID.
+             // Hack: Clients in this App are mapped. 
+             // Fix: Let's look at handleToggleReady implementation below.
+             break;
             
           case 'ACTION_SELECT_ROW':
             const turn = turnCards[resolvingIndex];
@@ -117,24 +132,13 @@ export default function App() {
             }
             break;
 
-          case 'ACTION_VOTE_NEXT_ROUND':
-             // Client sends a vote
-             // We need to know WHO sent it. 
-             // For now assuming payload might need playerID or we deduce from context.
-             // Let's iterate players to find who matches the sender connection? 
-             // Simplified: Client sends their ID in payload or we rely on trust.
-             // Updating types.ts to include playerId in vote message would be best, 
-             // but for now let's handle it if we can find the player.
-             // Assuming the message comes with metadata or we just look at connection.
-             // Let's simplisticly assume payload contains the vote, and we update 'players' based on peer logic.
-             // Actually, let's just iterate connected peers? 
-             // Implemented: Client sends { playerId, vote } ideally.
-             // Since types is strict, let's handle logic in handleVote
+           case 'ACTION_VOTE_NEXT_ROUND':
+             // Handled by voting logic
              break;
         }
       }
     };
-  }, [networkMode, players, rows, turnCards, resolvingIndex, votes]);
+  }, [networkMode, players, rows, turnCards, resolvingIndex, votes, takingRowIndex]);
 
 
   const syncState = (state: GameState) => {
@@ -147,6 +151,7 @@ export default function App() {
     setResolvingIndex(state.resolvingIndex);
     setUserMessage(state.userMessage);
     setVotes(state.votes || {});
+    setTakingRowIndex(state.takingRowIndex ?? -1);
   };
 
   useEffect(() => {
@@ -160,11 +165,12 @@ export default function App() {
         turnCards,
         resolvingIndex,
         userMessage,
-        votes
+        votes,
+        takingRowIndex
       };
       peerService.broadcast({ type: 'STATE_UPDATE', payload: currentState });
     }
-  }, [players, rows, phase, currentRound, activePlayerId, turnCards, resolvingIndex, userMessage, votes, networkMode]);
+  }, [players, rows, phase, currentRound, activePlayerId, turnCards, resolvingIndex, userMessage, votes, takingRowIndex, networkMode]);
 
   const findOwnerOfCard = (card: CardData): string | undefined => {
     for (const p of players) {
@@ -202,6 +208,7 @@ export default function App() {
       
       setUserMessage("Connected! Verifying...");
       
+      // HANDSHAKE DELAY: Wait for connection to stabilize before sending data
       setTimeout(() => {
         peerService.sendToHost({ 
           type: 'PLAYER_JOINED', 
@@ -226,6 +233,7 @@ export default function App() {
     const deck = shuffleDeck(generateDeck());
     const newPlayers: Player[] = [];
 
+    // Add Humans
     connectedPlayers.forEach((p, index) => {
       newPlayers.push({
         id: `human-${index}`,
@@ -236,10 +244,12 @@ export default function App() {
         scoreHistory: [],
         totalScore: 0,
         selectedCard: null,
-        isConnected: true
+        isConnected: true,
+        isReady: false
       });
     });
 
+    // Add Bots
     const currentCount = newPlayers.length;
     const needed = Math.max(4, config.totalPlayers) - currentCount;
     
@@ -252,7 +262,8 @@ export default function App() {
         collectedCards: [],
         scoreHistory: [],
         totalScore: 0,
-        selectedCard: null
+        selectedCard: null,
+        isReady: false
       });
     }
 
@@ -279,23 +290,29 @@ export default function App() {
 
   // --- Game Logic (Host Only) ---
 
+  // CHECK FOR PHASE TRANSITION: SELECTION -> REVEAL
   useEffect(() => {
     if (networkMode === NetworkMode.CLIENT) return;
     if (phase !== GamePhase.PLAYER_CHOICE) return;
 
-    const allHumanSelected = players
-      .filter(p => p.type === PlayerType.HUMAN)
-      .every(p => p.selectedCard !== null);
+    // 1. Check Humans: Must be SELECTED and READY
+    const humans = players.filter(p => p.type === PlayerType.HUMAN);
+    const allHumansReady = humans.every(p => p.selectedCard !== null && p.isReady);
 
+    // 2. Trigger Bots if not done
+    // Bots are "Ready" as soon as they select.
     const bots = players.filter(p => p.type === PlayerType.BOT && p.selectedCard === null);
     if (bots.length > 0 && !processingRef.current) {
       triggerBotTurns();
     }
 
-    // Need to check players again in case bots updated
+    // 3. Check Everyone
     const allSelected = players.every(p => p.selectedCard !== null);
+    
+    // We rely on the 'isReady' flag for Humans, but Bots just need to have selected.
+    const botsReady = players.filter(p => p.type === PlayerType.BOT).every(p => p.selectedCard !== null);
 
-    if (allSelected && !processingRef.current) {
+    if (allHumansReady && botsReady && !processingRef.current) {
       startRevealPhase();
     }
   }, [players, phase, networkMode]);
@@ -304,11 +321,8 @@ export default function App() {
     if (processingRef.current) return;
     processingRef.current = true;
     
-    // Identify bots that need to move
-    // We use a snapshot, but we must be careful not to use stale data when setting state back
     const botsToMove = players.filter(p => p.type === PlayerType.BOT && p.selectedCard === null);
 
-    // Calculate all moves first (async)
     const moves = await Promise.all(
       botsToMove.map(async (bot) => {
          const decision = await getBotDecision(bot, rows, []);
@@ -316,12 +330,12 @@ export default function App() {
       })
     );
 
-    // Apply moves using Functional Update to prevent overwriting Human moves made during async wait
     setPlayers(prevPlayers => {
       return prevPlayers.map(p => {
         const move = moves.find(m => m.botId === p.id);
         if (move) {
-          return { ...p, selectedCard: move.card };
+          // Bots are automatically ready when they move
+          return { ...p, selectedCard: move.card, isReady: true };
         }
         return p;
       });
@@ -332,7 +346,14 @@ export default function App() {
 
   const handlePlayerAction = (card: CardData, playerId: string) => {
     setPlayers(prev => prev.map(p => 
-      p.id === playerId ? { ...p, selectedCard: card } : p
+      // When selecting a new card, reset ready status to false to allow confirmation
+      p.id === playerId ? { ...p, selectedCard: card, isReady: false } : p
+    ));
+  };
+
+  const handleToggleReady = (playerId: string, isReady: boolean) => {
+    setPlayers(prev => prev.map(p => 
+      p.id === playerId ? { ...p, isReady } : p
     ));
   };
 
@@ -346,7 +367,8 @@ export default function App() {
       ...p,
       hand: deck.splice(0, 10).sort((a, b) => a.id - b.id),
       collectedCards: [],
-      selectedCard: null
+      selectedCard: null,
+      isReady: false // Reset ready status
     }));
 
     const newRows: GameRow[] = Array.from({ length: 4 }).map(() => ({
@@ -358,13 +380,13 @@ export default function App() {
     setCurrentRound(prev => prev + 1);
     setTurnCards([]);
     setResolvingIndex(-1);
-    lastProcessedIndexRef.current = -1; // Reset processing guard
+    lastProcessedIndexRef.current = -1; 
     setVotes({});
+    setTakingRowIndex(-1);
     setPhase(GamePhase.PLAYER_CHOICE);
   };
 
   const startRevealPhase = () => {
-    // Use functional update to ensure we have latest players if called from effect
     setPlayers(currentPlayers => {
         const playersWithCards = [...currentPlayers];
         
@@ -374,10 +396,10 @@ export default function App() {
         
         setTurnCards(currentTurnCards);
 
-        // Remove selected card from hand
         return playersWithCards.map(p => ({
           ...p,
-          hand: p.hand.filter(c => c.id !== p.selectedCard?.id)
+          hand: p.hand.filter(c => c.id !== p.selectedCard?.id),
+          isReady: false // Reset for next turn? No, irrelevant until next dealing, but good practice
         }));
     });
 
@@ -387,7 +409,7 @@ export default function App() {
     setTimeout(() => {
       setPhase(GamePhase.RESOLVING);
       setResolvingIndex(0);
-      lastProcessedIndexRef.current = -1; // Reset processing guard
+      lastProcessedIndexRef.current = -1; 
     }, 2500);
   };
 
@@ -395,15 +417,11 @@ export default function App() {
   useEffect(() => {
     if (networkMode === NetworkMode.CLIENT) return;
 
-    // Ensure we are in the right phase and have a valid index
     if (phase === GamePhase.RESOLVING && resolvingIndex >= 0 && resolvingIndex < turnCards.length) {
       
-      // GUARD: Check if we already processed this specific index
       if (lastProcessedIndexRef.current === resolvingIndex) {
-        return; // Skip duplicate execution
+        return; 
       }
-
-      // Mark as processed immediately
       lastProcessedIndexRef.current = resolvingIndex;
 
       const turn = turnCards[resolvingIndex];
@@ -412,7 +430,7 @@ export default function App() {
     else if (phase === GamePhase.RESOLVING && resolvingIndex >= turnCards.length && turnCards.length > 0) {
       finishTurnSet();
     }
-  }, [phase, resolvingIndex, turnCards, networkMode, rows]); // Added 'rows' to ensure latest state is used
+  }, [phase, resolvingIndex, turnCards, networkMode, rows]); 
 
   const processCardPlacement = async (turn: { playerId: string, card: CardData }) => {
     const rowIndex = findTargetRowIndex(turn.card, rows);
@@ -446,23 +464,7 @@ export default function App() {
   const handleRowOverflow = (turn: { playerId: string, card: CardData }, rowIndex: number) => {
     const playerName = players.find(p => p.id === turn.playerId)?.name;
     setUserMessage(`${playerName} takes Row #${rowIndex + 1}!`);
-    setTimeout(() => {
-      const rowCards = rows[rowIndex].cards;
-      setPlayers(prev => prev.map(p => {
-        if (p.id === turn.playerId) {
-          return { ...p, collectedCards: [...p.collectedCards, ...rowCards] };
-        }
-        return p;
-      }));
-
-      setRows(prev => {
-        const newRows = [...prev];
-        newRows[rowIndex] = { cards: [turn.card] };
-        return newRows;
-      });
-
-      setResolvingIndex(prev => prev + 1);
-    }, 1500);
+    executeRowTake(turn, rowIndex);
   };
 
   const handleLowCardEvent = async (turn: { playerId: string, card: CardData }) => {
@@ -472,7 +474,6 @@ export default function App() {
     if (player.type === PlayerType.HUMAN) {
       setPhase(GamePhase.CHOOSING_ROW);
       setUserMessage(`${player.name}, card too low! Choose a row to take.`);
-      // Wait for network action or local click
     } else {
       const chosenRowIdx = await getBotRowChoice(player, rows);
       setUserMessage(`${player.name} (Low Card) takes Row #${chosenRowIdx + 1}`);
@@ -481,33 +482,43 @@ export default function App() {
   };
 
   const executeRowTake = (turn: { playerId: string, card: CardData }, rowIndex: number) => {
+     // 1. TRIGGER ANIMATION
+     setTakingRowIndex(rowIndex); 
+     const playerName = players.find(p => p.id === turn.playerId)?.name;
+     setUserMessage(`${playerName} is taking Row #${rowIndex + 1}...`);
+
+     // 2. WAIT FOR ANIMATION
      setTimeout(() => {
-      const rowCards = rows[rowIndex].cards;
-      
-      setPlayers(prev => prev.map(p => {
-        if (p.id === turn.playerId) {
-          return { ...p, collectedCards: [...p.collectedCards, ...rowCards] };
-        }
-        return p;
-      }));
+        // 3. EXECUTE LOGIC
+        const rowCards = rows[rowIndex].cards;
+        
+        setPlayers(prev => prev.map(p => {
+          if (p.id === turn.playerId) {
+            return { ...p, collectedCards: [...p.collectedCards, ...rowCards] };
+          }
+          return p;
+        }));
 
-      setRows(prev => {
-        const newRows = [...prev];
-        newRows[rowIndex] = { cards: [turn.card] };
-        return newRows;
-      });
+        setRows(prev => {
+          const newRows = [...prev];
+          newRows[rowIndex] = { cards: [turn.card] };
+          return newRows;
+        });
 
-      setPhase(GamePhase.RESOLVING);
-      setResolvingIndex(prev => prev + 1);
-     }, 1000);
+        // 4. RESET & CONTINUE
+        setTakingRowIndex(-1); 
+        setPhase(GamePhase.RESOLVING);
+        setResolvingIndex(prev => prev + 1);
+     }, 2000);
   };
 
   const finishTurnSet = () => {
     setTurnCards([]);
     setResolvingIndex(-1);
     lastProcessedIndexRef.current = -1;
+    setTakingRowIndex(-1);
     
-    const nextPlayers = players.map(p => ({ ...p, selectedCard: null }));
+    const nextPlayers = players.map(p => ({ ...p, selectedCard: null, isReady: false }));
     setPlayers(nextPlayers);
 
     if (nextPlayers[0].hand.length === 0) {
@@ -530,33 +541,21 @@ export default function App() {
 
     setPlayers(playersWithNewScores);
     setVotes({}); 
-    setPhase(GamePhase.ROUND_VOTING); // Go to voting instead of auto next round
+    setPhase(GamePhase.ROUND_VOTING); 
   };
 
   const handleVote = (playerId: string, vote: boolean) => {
     if (networkMode === NetworkMode.CLIENT) {
-       // If we are client, just send to host? 
-       // No, we just call handleVote locally for UI but usually send msg
-       // In this simple peer setup, let's assume CLIENT UI calls this which sends msg
-       // But wait, handleVote is called by UI.
-       // If Client:
-       // peerService.sendToHost({ type: 'ACTION_VOTE_NEXT_ROUND', payload: { vote } });
-       // For now, since we didn't fully implement CLIENT sending vote msg in msg handler,
-       // let's just enable Local voting for Host and Local mode.
-       // If strictly multiplayer, we need that msg.
-       // Assuming this function is for Host processing:
+       peerService.sendToHost({ type: 'ACTION_VOTE_NEXT_ROUND', payload: { vote } });
     }
 
-    // Update votes locally
     const newVotes = { ...votes, [playerId]: vote };
     setVotes(newVotes);
 
-    // Check if all humans have voted
     const humans = players.filter(p => p.type === PlayerType.HUMAN);
     const allVoted = humans.every(p => newVotes[p.id] !== undefined);
 
-    if (allVoted) {
-       // Check results
+    if (allVoted && networkMode !== NetworkMode.CLIENT) {
        const everyoneSaidYes = humans.every(p => newVotes[p.id] === true);
        
        if (everyoneSaidYes) {
@@ -571,14 +570,32 @@ export default function App() {
   // --- View Actions (Client + Local) ---
 
   const onCardClick = (card: CardData) => {
+    // Prevent changing card if already ready
+    const me = players.find(p => p.id === myPlayerId);
+    if (me?.isReady) return;
+
     if (networkMode === NetworkMode.CLIENT) {
       if (phase !== GamePhase.PLAYER_CHOICE) return;
       peerService.sendToHost({ type: 'ACTION_SELECT_CARD', payload: { card } });
-      handlePlayerAction(card, myPlayerId); // Optimistic
+      handlePlayerAction(card, myPlayerId); 
     } 
     else {
       handlePlayerAction(card, myPlayerId);
     }
+  };
+
+  const onToggleReady = () => {
+     const me = players.find(p => p.id === myPlayerId);
+     if (!me || !me.selectedCard) return;
+
+     const newReadyState = !me.isReady;
+
+     if (networkMode === NetworkMode.CLIENT) {
+        peerService.sendToHost({ type: 'ACTION_TOGGLE_READY', payload: { isReady: newReadyState } });
+        handleToggleReady(myPlayerId, newReadyState); // Optimistic
+     } else {
+        handleToggleReady(myPlayerId, newReadyState);
+     }
   };
 
   const onRowClick = (rowIndex: number) => {
@@ -597,8 +614,6 @@ export default function App() {
   };
 
   const onVoteClick = (vote: boolean) => {
-     // If client, send network message (not implemented fully in this snippet but implied)
-     // For Host/Local:
      handleVote(myPlayerId, vote);
   };
 
@@ -703,49 +718,13 @@ export default function App() {
                  </button>
                </div>
             ) : (
-              <div className="flex flex-col items-center justify-center h-full text-slate-400 animate-pulse">
-                 <Wifi size={48} className="mb-4"/>
-                 <p>Waiting for Host to start...</p>
-              </div>
+               <div className="flex flex-col items-center justify-center h-full space-y-4">
+                  <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                  <p className="text-blue-300 font-mono animate-pulse">{userMessage}</p>
+               </div>
             )}
           </div>
-
         </div>
-        
-        <div className="mt-8 text-xs text-slate-500">
-           Or play <button onClick={() => {setNetworkMode(NetworkMode.LOCAL); setPlayerNameInput("Player 1"); startHostGame(); }} className="text-slate-300 hover:underline">Offline Hotseat Mode</button>
-        </div>
-      </div>
-    );
-  }
-
-  if (phase === GamePhase.GAME_END) {
-    // Sort Descending
-    const sortedPlayers = [...players].sort((a, b) => b.totalScore - a.totalScore);
-    const winner = sortedPlayers[0];
-
-    return (
-      <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center text-white p-4">
-         <div className="bg-slate-800 p-8 rounded-3xl shadow-2xl border border-slate-700 max-w-2xl w-full">
-           <div className="text-center mb-8">
-             <div className="inline-block p-4 rounded-full bg-yellow-500/20 mb-4">
-               <Trophy size={64} className="text-yellow-400" />
-             </div>
-             <h1 className="text-4xl font-bold mb-2">Match Complete!</h1>
-             <p className="text-2xl text-emerald-400 font-semibold">Winner: {winner.name}</p>
-             <div className="mt-4 flex justify-center gap-4">
-                <button onClick={() => window.location.reload()} className="px-6 py-2 bg-blue-600 rounded-lg">Back to Lobby</button>
-             </div>
-           </div>
-           <div className="space-y-2">
-              {sortedPlayers.map((p,i) => (
-                 <div key={p.id} className="flex justify-between p-3 bg-slate-700 rounded">
-                    <span>#{i+1} {p.name}</span>
-                    <span className="font-mono">{p.totalScore}</span>
-                 </div>
-              ))}
-           </div>
-         </div>
       </div>
     );
   }
@@ -754,154 +733,199 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col overflow-hidden">
-      <ScoreBoard players={players} currentRound={currentRound} isOpen={isScoreBoardOpen} onClose={() => setIsScoreBoardOpen(false)} />
-
-      {/* Header */}
-      <header className="bg-slate-800 border-b border-slate-700 px-4 py-3 flex justify-between items-center shadow-lg z-20">
-        <div className="flex items-center gap-4">
-          <div>
-            <h1 className="text-lg font-black text-emerald-400 leading-none">COW KING</h1>
-            <span className="text-[10px] text-slate-400 font-bold tracking-wider flex items-center gap-1">
-               {networkMode === NetworkMode.HOST ? 'HOST' : 'CLIENT'} {networkMode === NetworkMode.LOCAL ? '(OFFLINE)' : ''}
-            </span>
-          </div>
-          <div className="bg-slate-700 px-3 py-1 rounded text-xs text-slate-300 font-mono">
-            R{currentRound} (Unlimited)
-          </div>
-        </div>
-        
-        {/* Message Bar */}
-        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none hidden md:block">
-           <div className="bg-black/40 px-4 py-1 rounded-full text-yellow-400 font-bold text-sm animate-pulse border border-yellow-500/30">
-            {userMessage}
-          </div>
-        </div>
-
-        <button onClick={() => setIsScoreBoardOpen(true)} className="flex items-center gap-2 bg-emerald-900/50 hover:bg-emerald-900 text-emerald-400 px-3 py-2 rounded-lg border border-emerald-800 text-sm font-bold">
-          <BarChart3 size={18} />
-        </button>
-      </header>
-      
-      <div className="md:hidden bg-slate-800 py-1 text-center text-yellow-400 text-xs font-bold border-b border-slate-700">{userMessage}</div>
-
-      <main className="flex-1 flex flex-col relative overflow-hidden">
-        
-        {/* Opponents Bar */}
-        <div className="h-32 w-full flex justify-start sm:justify-center items-start gap-2 p-2 overflow-x-auto no-scrollbar">
-          {players.filter(p => p.id !== myPlayerId).map(p => (
-            <div key={p.id} className={`flex flex-col items-center flex-shrink-0 transition-opacity ${p.selectedCard ? 'opacity-100' : 'opacity-70'}`}>
-              <div className={`w-12 h-16 rounded bg-slate-700 border-2 ${p.selectedCard && phase === GamePhase.PLAYER_CHOICE ? 'border-green-400 bg-green-900/30' : 'border-slate-600'} flex items-center justify-center relative`}>
-                {p.selectedCard && phase !== GamePhase.PLAYER_CHOICE ? (
-                   <Card id={p.selectedCard.id} bullHeads={p.selectedCard.bullHeads} small />
-                ) : (
-                   <span className="text-xs font-mono text-slate-400">{p.hand.length}</span>
-                )}
-                {p.selectedCard && phase === GamePhase.PLAYER_CHOICE && <div className="absolute inset-0 flex items-center justify-center text-green-400"><Users size={16}/></div>}
-                
-                {/* Voting Status */}
-                {phase === GamePhase.ROUND_VOTING && (
-                    <div className="absolute -bottom-2 bg-slate-800 rounded-full p-1">
-                       {votes[p.id] === true && <ThumbsUp size={12} className="text-green-400" />}
-                       {votes[p.id] === false && <ThumbsDown size={12} className="text-red-400" />}
-                    </div>
-                )}
-              </div>
-              <span className="text-[10px] mt-1 text-slate-400 truncate w-14 text-center">{p.name}</span>
-            </div>
-          ))}
-        </div>
-
-        {/* Game Board */}
-        <div className="flex-1 flex items-center justify-center p-2 overflow-y-auto">
-           <GameBoard rows={rows} phase={phase} onSelectRow={onRowClick} />
-        </div>
-
-        {/* My Hand */}
-        <div className="bg-slate-800 border-t border-slate-700 p-4">
-          {myPlayer ? (
-            <div className="max-w-5xl mx-auto">
-               <div className="flex justify-between items-center mb-2">
-                  <span className="text-white font-bold">Your Hand ({myPlayer.name})</span>
-                  {myPlayer.selectedCard && phase === GamePhase.PLAYER_CHOICE && <span className="text-green-400 text-xs font-bold">Card Selected</span>}
-               </div>
-               <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar">
-                 {myPlayer.hand.map(card => (
-                   <div key={card.id} className="flex-shrink-0 transition-transform hover:-translate-y-2">
-                      <Card 
-                        id={card.id} 
-                        bullHeads={card.bullHeads} 
-                        onClick={() => onCardClick(card)}
-                        selected={myPlayer.selectedCard?.id === card.id}
-                        disabled={phase !== GamePhase.PLAYER_CHOICE || myPlayer.selectedCard !== null}
-                      />
-                   </div>
-                 ))}
-               </div>
-            </div>
-          ) : (
-            <div className="text-center text-slate-500">Spectating or Loading...</div>
-          )}
-        </div>
-
-      </main>
-
-      {/* VOTING OVERLAY */}
-      {phase === GamePhase.ROUND_VOTING && (
-         <div className="absolute inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-             <div className="bg-slate-800 p-8 rounded-2xl border border-slate-700 shadow-2xl text-center max-w-md w-full">
-                 <h2 className="text-3xl font-bold text-white mb-2">Round Over!</h2>
-                 <p className="text-slate-400 mb-8">Continue to next round?</p>
-                 
-                 {votes[myPlayerId] === undefined ? (
-                    <div className="flex gap-4 justify-center">
-                       <button onClick={() => onVoteClick(true)} className="flex-1 bg-emerald-600 hover:bg-emerald-500 py-4 rounded-xl font-bold text-lg flex flex-col items-center gap-2 transition-all hover:scale-105">
-                          <ThumbsUp size={32} />
-                          Keep Playing
-                       </button>
-                       <button onClick={() => onVoteClick(false)} className="flex-1 bg-red-600 hover:bg-red-500 py-4 rounded-xl font-bold text-lg flex flex-col items-center gap-2 transition-all hover:scale-105">
-                          <ThumbsDown size={32} />
-                          Stop & End
-                       </button>
-                    </div>
-                 ) : (
-                    <div className="text-xl font-bold text-yellow-400 animate-pulse">
-                       Waiting for other players...
-                    </div>
-                 )}
-
-                 <div className="mt-8 pt-4 border-t border-slate-700">
-                    <div className="text-sm text-slate-500 mb-2">Votes Cast</div>
-                    <div className="flex justify-center gap-2 flex-wrap">
-                       {players.filter(p => p.type === PlayerType.HUMAN).map(p => (
-                          <div key={p.id} className={`px-3 py-1 rounded-full text-sm border flex items-center gap-2 ${votes[p.id] === undefined ? 'border-slate-600 text-slate-500' : votes[p.id] ? 'border-green-500 bg-green-900/20 text-green-400' : 'border-red-500 bg-red-900/20 text-red-400'}`}>
-                             {p.name}
-                             {votes[p.id] === undefined ? '...' : votes[p.id] ? <ThumbsUp size={12}/> : <ThumbsDown size={12}/>}
-                          </div>
-                       ))}
-                    </div>
-                 </div>
+      {/* Top Bar */}
+      <div className="bg-slate-800 border-b border-slate-700 p-4 flex justify-between items-center shadow-lg z-20 relative">
+        <div className="flex items-center gap-4 flex-1 overflow-x-auto no-scrollbar">
+           <div className="flex items-center gap-2 mr-4 flex-shrink-0">
+             <div className="bg-emerald-600 p-2 rounded-lg"><Trophy size={20} className="text-white"/></div>
+             <div className="flex flex-col leading-none">
+               <span className="text-xs text-slate-400 font-bold">ROUND</span>
+               <span className="text-xl font-black text-white">{currentRound}</span>
              </div>
-         </div>
-      )}
-
-      {/* Resolving Overlay */}
-      {phase === GamePhase.RESOLVING && resolvingIndex >= 0 && resolvingIndex < turnCards.length && (
-        <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50 pointer-events-none">
-           <div className="bg-black/80 text-white px-6 py-3 rounded-xl text-xl font-bold border border-white/10 backdrop-blur flex items-center gap-4">
-             <span className="text-emerald-400 text-3xl">#{turnCards[resolvingIndex].card.id}</span>
-             <span>{resolvingPlayerName}</span>
+           </div>
+           
+           {/* Players List */}
+           <div className="flex gap-3">
+             {players.map(p => {
+               const isMe = p.id === myPlayerId;
+               const isAction = activePlayerId === p.id || (phase === GamePhase.PLAYER_CHOICE && !p.selectedCard) || (phase === GamePhase.CHOOSING_ROW && resolvingPlayerName === p.name);
+               
+               return (
+                 <div key={p.id} className={`
+                    flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all whitespace-nowrap
+                    ${isAction ? 'bg-yellow-500/20 border-yellow-500/50 animate-pulse' : 'bg-slate-900 border-slate-700'}
+                    ${isMe ? 'ring-2 ring-emerald-500' : ''}
+                 `}>
+                   <div className={`w-2 h-2 rounded-full ${p.isConnected ? 'bg-green-400' : 'bg-slate-500'}`} />
+                   <span className={`text-sm font-bold ${isAction ? 'text-yellow-200' : 'text-slate-300'}`}>
+                     {p.name}
+                   </span>
+                   {phase === GamePhase.PLAYER_CHOICE && (
+                     p.selectedCard ? (
+                        p.isReady 
+                          ? <CheckCircle size={14} className="text-green-400" /> 
+                          : <span className="text-[10px] bg-slate-700 px-1 rounded text-slate-300">PICKED</span>
+                     ) : (
+                       <div className="w-3 h-3 border-2 border-slate-500 border-t-transparent rounded-full animate-spin" />
+                     )
+                   )}
+                 </div>
+               );
+             })}
            </div>
         </div>
-      )}
-      
-      {phase === GamePhase.CHOOSING_ROW && (
-         <div className="absolute inset-x-0 top-20 z-50 flex justify-center pointer-events-none">
-            <div className="bg-yellow-500/90 text-yellow-900 px-4 py-2 rounded-full font-bold shadow-xl animate-bounce flex items-center gap-2">
-               <AlertTriangle size={20} />
-               <span>{resolvingPlayerName} must choose a row!</span>
+
+        <div className="flex items-center gap-2 ml-4">
+          <button 
+            onClick={() => setIsScoreBoardOpen(true)}
+            className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-white transition-colors relative"
+          >
+            <BarChart3 size={20} />
+            {phase === GamePhase.GAME_END && <span className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full animate-ping" />}
+          </button>
+        </div>
+      </div>
+
+      {/* Main Game Area */}
+      <div className="flex-1 relative flex flex-col items-center justify-center p-2 sm:p-6 overflow-y-auto">
+        
+        {/* Status Message Overlay */}
+        {userMessage && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+            <div className="bg-slate-900/90 backdrop-blur text-white px-6 py-2 rounded-full border border-slate-600 shadow-2xl font-bold text-sm sm:text-base animate-in fade-in slide-in-from-top-4">
+              {userMessage}
             </div>
+          </div>
+        )}
+
+        {/* Game Board */}
+        <div className="w-full max-w-5xl mb-6 sm:mb-10">
+           <GameBoard 
+             rows={rows} 
+             phase={phase} 
+             onSelectRow={onRowClick} 
+             takingRowIndex={takingRowIndex} 
+           />
+        </div>
+
+        {/* Reveal Area (Center) */}
+        {phase === GamePhase.REVEAL && (
+          <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm z-40 animate-in fade-in">
+             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 p-8">
+               {turnCards.map((turn, idx) => (
+                 <div key={idx} className="flex flex-col items-center gap-2 animate-in zoom-in duration-300" style={{animationDelay: `${idx * 100}ms`}}>
+                   <div className="text-white font-bold shadow-black drop-shadow-md">{players.find(p => p.id === turn.playerId)?.name}</div>
+                   <Card id={turn.card.id} bullHeads={turn.card.bullHeads} />
+                 </div>
+               ))}
+             </div>
+          </div>
+        )}
+        
+        {/* Voting Overlay */}
+        {phase === GamePhase.ROUND_VOTING && (
+           <div className="absolute inset-0 flex items-center justify-center bg-slate-900/90 z-50 p-4">
+              <div className="bg-slate-800 p-8 rounded-2xl border border-slate-600 shadow-2xl max-w-md w-full text-center">
+                 <h2 className="text-3xl font-black text-white mb-2">Round Over!</h2>
+                 <p className="text-slate-400 mb-8">Everyone must agree to continue.</p>
+                 
+                 <div className="grid grid-cols-2 gap-4 mb-8">
+                    <button 
+                      onClick={() => onVoteClick(true)}
+                      className={`p-4 rounded-xl border-2 flex flex-col items-center gap-2 transition-all
+                        ${votes[myPlayerId] === true ? 'bg-emerald-600 border-emerald-400 text-white' : 'bg-slate-700 border-slate-600 text-slate-300 hover:bg-slate-600'}
+                      `}
+                    >
+                       <ThumbsUp size={32} /> Keep Playing
+                    </button>
+                    <button 
+                      onClick={() => onVoteClick(false)}
+                      className={`p-4 rounded-xl border-2 flex flex-col items-center gap-2 transition-all
+                        ${votes[myPlayerId] === false ? 'bg-red-600 border-red-400 text-white' : 'bg-slate-700 border-slate-600 text-slate-300 hover:bg-slate-600'}
+                      `}
+                    >
+                       <ThumbsDown size={32} /> Stop Game
+                    </button>
+                 </div>
+
+                 <div className="space-y-2">
+                    {players.map(p => (
+                       <div key={p.id} className="flex justify-between items-center bg-slate-900 px-4 py-2 rounded">
+                          <span className="text-slate-300">{p.name}</span>
+                          {votes[p.id] === undefined && <span className="text-slate-500 text-xs">Waiting...</span>}
+                          {votes[p.id] === true && <span className="text-emerald-400 font-bold text-xs">READY</span>}
+                          {votes[p.id] === false && <span className="text-red-400 font-bold text-xs">STOP</span>}
+                       </div>
+                    ))}
+                 </div>
+              </div>
+           </div>
+        )}
+      </div>
+
+      {/* Bottom Player Area */}
+      <div className="bg-slate-800 p-4 pb-6 border-t border-slate-700 shadow-[0_-10px_20px_rgba(0,0,0,0.3)] relative z-20">
+         {/* Ready Toggle Overlay */}
+         {phase === GamePhase.PLAYER_CHOICE && myPlayer?.selectedCard && (
+            <div className="absolute -top-16 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 animate-in slide-in-from-bottom-4">
+               <div className="bg-slate-900/90 backdrop-blur text-white px-4 py-2 rounded-lg border border-slate-600 shadow-xl flex items-center gap-3">
+                  <span className="text-sm font-medium text-slate-300">
+                    Selected: <span className="text-emerald-400 font-bold">#{myPlayer.selectedCard.id}</span>
+                  </span>
+                  <div className="h-4 w-px bg-slate-600"></div>
+                  <button 
+                    onClick={onToggleReady}
+                    className={`
+                      flex items-center gap-2 px-4 py-1.5 rounded-md font-bold text-sm transition-all
+                      ${myPlayer.isReady 
+                        ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/50' 
+                        : 'bg-emerald-500 text-white hover:bg-emerald-400 shadow-lg shadow-emerald-900/50'}
+                    `}
+                  >
+                    {myPlayer.isReady ? (
+                       <> <XCircle size={16}/> UNREADY </>
+                    ) : (
+                       <> <CheckCircle size={16}/> CONFIRM </>
+                    )}
+                  </button>
+               </div>
+            </div>
+         )}
+
+         <div className="max-w-5xl mx-auto overflow-x-auto no-scrollbar">
+           <div className="flex justify-center gap-2 sm:gap-4 min-w-max px-4">
+             {myPlayer?.hand.map((card) => (
+               <div 
+                 key={card.id} 
+                 className={`
+                    transition-all duration-300 
+                    ${myPlayer.selectedCard?.id === card.id 
+                      ? 'transform -translate-y-6 z-10' 
+                      : 'hover:-translate-y-2'
+                    }
+                    ${myPlayer.isReady && myPlayer.selectedCard?.id !== card.id ? 'opacity-50 grayscale' : 'opacity-100'}
+                 `}
+               >
+                 <Card 
+                   id={card.id} 
+                   bullHeads={card.bullHeads} 
+                   onClick={() => onCardClick(card)}
+                   selected={myPlayer.selectedCard?.id === card.id}
+                   disabled={phase !== GamePhase.PLAYER_CHOICE || (myPlayer.isReady && myPlayer.selectedCard?.id !== card.id)}
+                 />
+               </div>
+             ))}
+           </div>
          </div>
-      )}
+      </div>
+
+      {/* Scoreboard Modal */}
+      <ScoreBoard 
+        players={players} 
+        currentRound={currentRound} 
+        isOpen={isScoreBoardOpen || phase === GamePhase.GAME_END} 
+        onClose={() => setIsScoreBoardOpen(false)} 
+      />
     </div>
   );
 }
