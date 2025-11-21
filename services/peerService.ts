@@ -15,10 +15,17 @@ export class PeerService {
   // Initialize as Host or Client
   init(id?: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      // Create Peer instance. If id is provided, tries to use it (good for reconnects, but risky if taken)
-      // We let PeerJS assign a random ID for now to avoid collisions, or use a short code logic if we had a server.
-      // For this serverless demo, we rely on the long ID.
-      this.peer = new Peer(id || '');
+      // Use Google's free STUN servers to help punch through NATs (Mobile/WiFi connections)
+      this.peer = new Peer(id || '', {
+        config: {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+          ]
+        },
+        debug: 2 // Log errors/warnings
+      });
 
       this.peer.on('open', (id) => {
         console.log('My Peer ID is: ' + id);
@@ -34,8 +41,12 @@ export class PeerService {
       });
 
       this.peer.on('error', (err) => {
-        console.error(err);
+        console.error('PeerJS Error:', err);
         reject(err);
+      });
+
+      this.peer.on('disconnected', () => {
+        console.log('Peer disconnected from signaling server');
       });
     });
   }
@@ -45,10 +56,13 @@ export class PeerService {
     return new Promise((resolve, reject) => {
       if (!this.peer) return reject('Peer not initialized');
 
-      const conn = this.peer.connect(hostId);
+      console.log('Attempting to connect to Host:', hostId);
+      const conn = this.peer.connect(hostId, {
+        reliable: true
+      });
       
       conn.on('open', () => {
-        console.log('Connected to Host');
+        console.log('Connected to Host!');
         this.hostConnection = conn;
         this.setupConnectionEvents(conn);
         resolve();
@@ -58,6 +72,13 @@ export class PeerService {
         console.error('Connection Error', err);
         reject(err);
       });
+      
+      // If connection hangs, timeout manually
+      setTimeout(() => {
+        if (!conn.open) {
+          // reject('Connection timeout'); // Optional: strict timeout
+        }
+      }, 5000);
     });
   }
 
@@ -74,18 +95,28 @@ export class PeerService {
   sendToHost(msg: NetworkMessage) {
     if (this.hostConnection && this.hostConnection.open) {
       this.hostConnection.send(msg);
+    } else {
+      console.warn('Cannot send to host, connection not open');
     }
   }
 
   private setupConnectionEvents(conn: DataConnection) {
     conn.on('data', (data) => {
+      // console.log('Received data:', data);
       this.onMessage(data as NetworkMessage);
     });
 
     conn.on('close', () => {
       console.log('Connection closed:', conn.peer);
       this.connections = this.connections.filter(c => c !== conn);
+      if (this.hostConnection === conn) {
+        this.hostConnection = null;
+      }
       this.onDisconnect();
+    });
+    
+    conn.on('error', (err) => {
+      console.error('DataConnection Error:', err);
     });
   }
 

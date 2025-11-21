@@ -56,43 +56,64 @@ export default function App() {
   
   // UI State
   const [isScoreBoardOpen, setIsScoreBoardOpen] = useState(false);
-  const [showHand, setShowHand] = useState(true); // Default true for personal device
   const processingRef = useRef(false);
 
-  // --- Initialization & Networking Hooks ---
+  // --- Networking Setup (Centralized) ---
 
+  // This effect handles ALL incoming network messages
   useEffect(() => {
-    // Setup PeerService listeners
-    peerService.onMessage = (msg) => {
-      switch (msg.type) {
-        case 'WELCOME':
-          setMyPlayerId(msg.payload.playerId);
-          syncState(msg.payload.gameState);
-          break;
-        case 'STATE_UPDATE':
-          syncState(msg.payload);
-          break;
-        case 'PLAYER_JOINED':
-          setConnectedPlayers(prev => [...prev, msg.payload]);
-          break;
-        case 'ACTION_SELECT_CARD':
-          if (networkMode === NetworkMode.HOST) {
-            // Find which player sent this? 
-            // In a real app, we'd map connection ID to player ID. 
-            // For simplicity here, we assume valid actions.
-            // We need to find the player who hasn't played yet corresponding to the sender.
-            // Actually, 'activePlayerId' logic is different in concurrent multiplayer.
-            // Everyone can pick at once.
-            handlePlayerAction(msg.payload.card, undefined); // We need to infer player or pass it
-          }
-          break;
+    peerService.onMessage = (msg: NetworkMessage) => {
+      // console.log('App processing message:', msg);
+
+      // --- CLIENT LOGIC ---
+      if (networkMode === NetworkMode.CLIENT) {
+        switch (msg.type) {
+          case 'WELCOME':
+            // Host assigned us an ID/State (Not fully used in this simple flow yet, but good practice)
+            setMyPlayerId(msg.payload.playerId);
+            syncState(msg.payload.gameState);
+            break;
+          case 'STATE_UPDATE':
+            syncState(msg.payload);
+            break;
+        }
+      } 
+      
+      // --- HOST LOGIC ---
+      else if (networkMode === NetworkMode.HOST) {
+        switch (msg.type) {
+          case 'PLAYER_JOINED':
+            // Prevent duplicates
+            setConnectedPlayers(prev => {
+              if (prev.some(p => p.name === msg.payload.name)) return prev;
+              return [...prev, msg.payload];
+            });
+            setUserMessage(`${msg.payload.name} joined!`);
+            break;
+            
+          case 'ACTION_SELECT_CARD':
+            // Host receives a card selection from a client
+            // We need to find WHICH player held this card to identify them
+            const ownerId = findOwnerOfCard(msg.payload.card);
+            if (ownerId) {
+              handlePlayerAction(msg.payload.card, ownerId);
+            }
+            break;
+            
+          case 'ACTION_SELECT_ROW':
+            // Host receives a row selection from a client
+            // We check if it's the current resolving player's turn
+            const turn = turnCards[resolvingIndex];
+            if (turn) {
+               // We assume the sender is valid for now (simple demo)
+               executeRowTake(turn, msg.payload.rowIndex);
+            }
+            break;
+        }
       }
     };
+  }, [networkMode, players, rows, turnCards, resolvingIndex]); // Re-bind when state changes so Host has latest data
 
-    return () => {
-      // Cleanup on unmount? Maybe not if we want to persist.
-    };
-  }, [networkMode]);
 
   // Syncs local state with received Network State (Client Mode)
   const syncState = (state: GameState) => {
@@ -124,11 +145,23 @@ export default function App() {
     }
   }, [players, rows, phase, currentRound, activePlayerId, turnCards, resolvingIndex, userMessage, networkMode]);
 
+  // --- Helper: Find card owner ---
+  const findOwnerOfCard = (card: CardData): string | undefined => {
+    // Look through all players' hands
+    for (const p of players) {
+      if (p.hand.some(c => c.id === card.id)) {
+        return p.id;
+      }
+    }
+    return undefined;
+  };
+
+
   // --- Lobby Actions ---
 
   const initHost = async () => {
     try {
-      const id = await peerService.init();
+      const id = await peerService.init(); // Will return random ID
       setMyPeerId(id);
       setNetworkMode(NetworkMode.HOST);
       setPlayerNameInput("Host");
@@ -143,14 +176,18 @@ export default function App() {
     if (!playerNameInput) return alert("Enter Name");
 
     try {
-      await peerService.init();
+      await peerService.init(); // Client needs peer instance too
       setNetworkMode(NetworkMode.CLIENT);
+      setUserMessage("Connecting to host...");
+      
       await peerService.connectToHost(hostIdInput);
+      
       // Send join info
       peerService.sendToHost({ 
         type: 'PLAYER_JOINED', 
         payload: { id: 'temp', name: playerNameInput } 
       });
+      
       setUserMessage("Connected! Waiting for host to start...");
     } catch (e) {
       alert("Could not connect: " + e);
@@ -210,22 +247,6 @@ export default function App() {
     
     // Host is always human-0
     setMyPlayerId('human-0'); 
-    
-    // Notify clients of their IDs
-    // We need to map peer connections to player IDs. 
-    // For this simple demo, we assume connection order matches array order offset by 1 (Host is 0).
-    // Host manually sends WELCOME to each connection? 
-    // PeerService abstraction makes individual targeting harder without refactor.
-    // Quick Fix: Broadcast start, clients figure out who they are by name? 
-    // Better: Client sends Name, Host assigns ID based on Name.
-    
-    // Actually, we'll just broadcast the state. Clients need to know their ID.
-    // We will iterate connections in PeerService and send specific Welcome messages?
-    // Since we don't have that easily exposed, let's rely on NAME matching for ID assignment on client side.
-    // Clients will look at the 'players' list, find their name, and setMyPlayerId.
-    
-    // IMPORTANT: Trigger bots immediately if needed
-    // In parallel play, bots can think while humans pick.
   };
   
   // Handle name-based ID claiming for clients
@@ -233,7 +254,10 @@ export default function App() {
     if (networkMode === NetworkMode.CLIENT && phase !== GamePhase.LOBBY && myPlayerId === 'human-0') {
        // Try to find my ID based on name
        const me = players.find(p => p.name === playerNameInput);
-       if (me) setMyPlayerId(me.id);
+       if (me) {
+         setMyPlayerId(me.id);
+         // console.log("Matched my player ID to:", me.id);
+       }
     }
   }, [players, networkMode, phase, playerNameInput, myPlayerId]);
 
@@ -278,68 +302,11 @@ export default function App() {
     processingRef.current = false;
   };
 
-  const handlePlayerAction = (card: CardData, playerId?: string) => {
-    // If Host receives a card selection (from self or network)
-    // We need to know WHO selected it.
-    
-    // For Local/Host self:
-    if (!playerId) playerId = myPlayerId;
-
+  const handlePlayerAction = (card: CardData, playerId: string) => {
     setPlayers(prev => prev.map(p => 
       p.id === playerId ? { ...p, selectedCard: card } : p
     ));
   };
-
-  // When a client sends an action
-  const receiveClientAction = (action: NetworkMessage) => {
-    if (networkMode !== NetworkMode.HOST) return;
-    
-    // We need to identify the sender. 
-    // PeerService generic 'onMessage' doesn't pass Connection ID easily in this simplified version.
-    // We will rely on the payload containing the ID or Name.
-    // Let's assume we trust the client for this demo.
-    // Real app needs secure auth.
-    
-    // WAIT: The message payloads defined in types don't have playerId. 
-    // I'll assume the Client logic sends the action, and Host iterates to find who has that name/IP?
-    // Let's update the Client to send the ID it thinks it is.
-  };
-  
-  // OVERRIDE: PeerService `onMessage` callback needs to be smarter in the useEffect above.
-  // I've simplified it to just `handlePlayerAction`. 
-  // But `handlePlayerAction` needs the ID.
-  // Let's assume the `ACTION_SELECT_CARD` payload comes with `card`.
-  // We need to match it to a player who needs to play. 
-  // Since `hand` is unique, we can find the player who holds that card!
-  
-  const findOwnerOfCard = (card: CardData): string | undefined => {
-    return players.find(p => p.hand.some(h => h.id === card.id))?.id;
-  };
-
-  // Redefining the listener to be robust
-  useEffect(() => {
-    peerService.onMessage = (msg) => {
-      if (networkMode === NetworkMode.CLIENT) {
-        if (msg.type === 'STATE_UPDATE') syncState(msg.payload);
-      } 
-      else if (networkMode === NetworkMode.HOST) {
-        if (msg.type === 'PLAYER_JOINED') {
-          setConnectedPlayers(prev => [...prev, msg.payload]);
-        }
-        else if (msg.type === 'ACTION_SELECT_CARD') {
-          const pId = findOwnerOfCard(msg.payload.card);
-          if (pId) handlePlayerAction(msg.payload.card, pId);
-        }
-        else if (msg.type === 'ACTION_SELECT_ROW') {
-          // Who is resolving?
-          // The logic uses `resolvingIndex` -> `turnCards` -> `playerId`.
-          const turn = turnCards[resolvingIndex];
-          if (turn) executeRowTake(turn, msg.payload.rowIndex);
-        }
-      }
-    };
-  }, [networkMode, players, turnCards, resolvingIndex]); // Dependencies are crucial for Host
-
 
   // --- Phase Logic (Host Only) ---
 
@@ -534,10 +501,11 @@ export default function App() {
     // If Client, send to Host
     if (networkMode === NetworkMode.CLIENT) {
       if (phase !== GamePhase.PLAYER_CHOICE) return;
-      // Optimistic update? No, wait for Host state update to confirm selection
-      // But we can show a spinner or local select state
-      handlePlayerAction(card, myPlayerId); // Visual feedback locally
+      // Send to Host
       peerService.sendToHost({ type: 'ACTION_SELECT_CARD', payload: { card } });
+      
+      // Optimistic UI: Show selection on Client immediately for feedback
+      handlePlayerAction(card, myPlayerId);
     } 
     // If Host/Local
     else {
