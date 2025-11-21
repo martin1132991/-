@@ -9,7 +9,8 @@ import {
   PlayerType, 
   NetworkMode,
   GameState,
-  NetworkMessage
+  NetworkMessage,
+  ChatMessage
 } from './types';
 import { 
   generateDeck, 
@@ -57,6 +58,7 @@ const App: React.FC = () => {
   const [isChatOpen, setIsChatOpen] = useState<boolean>(false);
   const [chatInput, setChatInput] = useState<string>("");
   const [timeLeft, setTimeLeft] = useState<number>(0); // Local visual countdown
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]); // Global chat state
 
   // Audio State
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -75,7 +77,7 @@ const App: React.FC = () => {
   const [isJoining, setIsJoining] = useState<boolean>(false);
   const [isConnected, setIsConnected] = useState<boolean>(false);
 
-  // Reaction Cleanup Refs
+  // Reaction Cleanup Refs (Deprecated by chatMessages, but kept for safety)
   const reactionTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   // Save ID on change
@@ -150,6 +152,7 @@ const App: React.FC = () => {
           setVotes(state.votes || {});
           setTakingRowIndex(state.takingRowIndex ?? -1); // Sync animation state
           setTurnDeadline(state.turnDeadline || 0);
+          setChatMessages(state.chatMessages || []); // Sync chat
         }
       });
 
@@ -224,11 +227,12 @@ const App: React.FC = () => {
         userMessage,
         votes,
         takingRowIndex,
-        turnDeadline
+        turnDeadline,
+        chatMessages
       };
       firebaseService.updateGameState(roomId, state);
     }
-  }, [players, rows, phase, currentRound, turnCards, resolvingIndex, userMessage, votes, takingRowIndex, turnDeadline, networkMode, roomId]);
+  }, [players, rows, phase, currentRound, turnCards, resolvingIndex, userMessage, votes, takingRowIndex, turnDeadline, chatMessages, networkMode, roomId]);
 
 
   // --- Game Loop Logic (Host) ---
@@ -304,6 +308,7 @@ const App: React.FC = () => {
     lastProcessedIndexRef.current = -1;
     setUserMessage(`Round ${currentRound} Starting!`);
     setVotes({});
+    setChatMessages([]); // Clear chat on new round
     audioService.playFanfare(); // Use fanfare as start sound too
 
     // Generate Deck & Deal
@@ -457,31 +462,27 @@ const App: React.FC = () => {
   };
 
   const handleReceiveReaction = (playerId: string, content: string, type: 'emoji' | 'text') => {
-    // 1. Update player state with reaction
-    setPlayers(prev => prev.map(p => {
-      if (p.id === playerId) {
-        return { ...p, lastReaction: { type, content, timestamp: Date.now() } };
-      }
-      return p;
-    }));
+    const player = players.find(p => p.id === playerId);
+    if (!player) return;
+
+    const newMessage: ChatMessage = {
+      id: Math.random().toString(36).substr(2, 9),
+      playerId,
+      playerName: player.name,
+      content,
+      type,
+      timestamp: Date.now()
+    };
+
+    // Host updates the centralized chat list
+    setChatMessages(prev => [...prev, newMessage]);
 
     if (type === 'emoji') audioService.playClick();
 
-    // 2. Schedule cleanup (Host Only manages cleanup to ensure sync)
-    // In Local mode, we are host. In Network Host, we are host.
-    // Clients just receive the state update from Host.
+    // Host schedules cleanup for this specific message
     if (networkMode !== NetworkMode.CLIENT) {
-      if (reactionTimeouts.current[playerId]) {
-        clearTimeout(reactionTimeouts.current[playerId]);
-      }
-
-      reactionTimeouts.current[playerId] = setTimeout(() => {
-         setPlayers(prev => prev.map(p => {
-            if (p.id === playerId) {
-               return { ...p, lastReaction: undefined };
-            }
-            return p;
-         }));
+      setTimeout(() => {
+        setChatMessages(prev => prev.filter(m => m.id !== newMessage.id));
       }, 5000);
     }
   };
@@ -600,7 +601,6 @@ const App: React.FC = () => {
     setTakingRowIndex(rowIndex);
     audioService.playTakeRow();
     
-    // ADDED: Distinct message for clarity during the animation
     const player = players.find(p => p.id === playerId);
     if (player) {
       setUserMessage(`${player.name} takes Row ${rowIndex + 1}!`);
@@ -891,7 +891,6 @@ const App: React.FC = () => {
 
           <button 
             onClick={startGame}
-            // disabled={players.length < 2} // Removed as per request to allow solo testing with bots
             className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 text-white font-bold py-4 rounded-xl transition-all text-xl"
           >
             Start Game
@@ -952,15 +951,6 @@ const App: React.FC = () => {
                   {p.isReady && <CheckCircle2 size={10} className="text-green-400" />}
                   {p.name}
                   <span className="bg-slate-900 px-1 rounded text-slate-500">{p.totalScore}</span>
-
-                  {/* Chat Bubble Overlay */}
-                  {p.lastReaction && (
-                    <div className="inline-block ml-1 z-50 animate-in fade-in duration-200">
-                      <div className="bg-white text-slate-900 px-2 py-0.5 rounded-md font-bold text-xs border border-slate-200">
-                        {p.lastReaction.content}
-                      </div>
-                    </div>
-                  )}
                </div>
              ))}
            </div>
@@ -981,7 +971,26 @@ const App: React.FC = () => {
       {/* Main Game Area */}
       <div className="flex-1 relative flex flex-col overflow-y-auto overflow-x-hidden bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-slate-950">
          
-         {/* Message Overlay (Toast) */}
+         {/* BIG CHAT OVERLAY (Stacked Messages) */}
+         <div className="absolute top-4 left-2 sm:left-4 z-40 flex flex-col gap-2 w-[250px] sm:w-[350px] pointer-events-none">
+            {chatMessages.map((msg) => (
+               <div key={msg.id} className="animate-in slide-in-from-left-10 fade-in duration-300 flex flex-col items-start">
+                  <div className="flex items-center gap-2">
+                     <div className="bg-slate-900/80 text-slate-300 text-[10px] px-2 py-0.5 rounded-full border border-slate-700">
+                       {msg.playerName}
+                     </div>
+                  </div>
+                  <div className={`
+                    mt-1 px-4 py-2 rounded-2xl rounded-tl-none shadow-lg backdrop-blur-md border border-slate-500/30 text-white
+                    ${msg.type === 'emoji' ? 'text-4xl bg-slate-800/60' : 'text-lg font-medium bg-blue-600/80'}
+                  `}>
+                     {msg.content}
+                  </div>
+               </div>
+            ))}
+         </div>
+
+         {/* Message Overlay (System/Game Toast) */}
          {userMessage && (
            <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-slate-800/90 backdrop-blur border border-slate-600 text-white px-6 py-2 rounded-full shadow-xl z-40 animate-in fade-in slide-in-from-top-4 font-medium text-center max-w-[90%]">
              {userMessage}

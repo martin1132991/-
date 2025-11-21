@@ -14,6 +14,15 @@ export interface RoundResult {
   heads: number;
 }
 
+export interface ChatMessage {
+  id: string;
+  playerId: string;
+  playerName: string;
+  content: string;
+  type: 'emoji' | 'text';
+  timestamp: number;
+}
+
 export interface Player {
   id: string;
   name: string;
@@ -25,7 +34,7 @@ export interface Player {
   selectedCard: CardData | null; // Card chosen for the current turn
   isConnected?: boolean; // For multiplayer status
   isReady?: boolean; // Optional ready state for toggle feature
-  lastReaction?: { // New: For emojis/chat
+  lastReaction?: { // Deprecated in favor of global chatMessages, kept for type safety if needed
     type: 'emoji' | 'text';
     content: string;
     timestamp: number;
@@ -73,6 +82,7 @@ export interface GameState {
   votes: Record<string, boolean>;
   takingRowIndex: number; // Index of the row currently being captured (animation state)
   turnDeadline: number; // Timestamp for when the turn ends
+  chatMessages: ChatMessage[]; // Synchronized list of active chat messages
 }
 
 export type NetworkMessage = 
