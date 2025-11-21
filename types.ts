@@ -52,8 +52,8 @@ export interface GameConfig {
 
 export enum NetworkMode {
   LOCAL = 'LOCAL',   // Hotseat / Pass & Play
-  HOST = 'HOST',     // P2P Host
-  CLIENT = 'CLIENT'  // P2P Client
+  HOST = 'HOST',     // Firebase Host
+  CLIENT = 'CLIENT'  // Firebase Client
 }
 
 export interface GameState {
@@ -70,11 +70,9 @@ export interface GameState {
 }
 
 export type NetworkMessage = 
-  | { type: 'WELCOME'; payload: { playerId: string; gameState: GameState } }
   | { type: 'STATE_UPDATE'; payload: GameState }
-  | { type: 'ACTION_SELECT_CARD'; payload: { card: CardData } }
-  | { type: 'ACTION_SELECT_ROW'; payload: { rowIndex: number } }
-  | { type: 'ACTION_VOTE_NEXT_ROUND'; payload: { vote: boolean } }
-  | { type: 'ACTION_TOGGLE_READY'; payload: { isReady: boolean } }
-  | { type: 'PLAYER_JOINED'; payload: { id: string; name: string } }
-  | { type: 'START_GAME'; payload: { config: GameConfig } };
+  | { type: 'ACTION_SELECT_CARD'; payload: { card: CardData; playerId: string } }
+  | { type: 'ACTION_SELECT_ROW'; payload: { rowIndex: number; playerId: string } }
+  | { type: 'ACTION_VOTE_NEXT_ROUND'; payload: { vote: boolean; playerId: string } }
+  | { type: 'ACTION_TOGGLE_READY'; payload: { isReady: boolean; playerId: string } }
+  | { type: 'PLAYER_JOINED'; payload: { id: string; name: string } };
