@@ -47,11 +47,16 @@ export const shuffleDeck = (deck: CardData[]): CardData[] => {
 export const findTargetRowIndex = (card: CardData, rows: GameRow[]): number => {
   let bestRowIndex = -1;
   let minDiff = Infinity;
+  const cardId = Number(card.id); // Force Number type to prevent string comparison bugs
 
   rows.forEach((row, index) => {
+    if (!row.cards || row.cards.length === 0) return; // Safety check
+    
     const lastCard = row.cards[row.cards.length - 1];
-    if (card.id > lastCard.id) {
-      const diff = card.id - lastCard.id;
+    const lastCardId = Number(lastCard.id); // Force Number type
+    
+    if (cardId > lastCardId) {
+      const diff = cardId - lastCardId;
       if (diff < minDiff) {
         minDiff = diff;
         bestRowIndex = index;

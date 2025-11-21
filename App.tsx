@@ -22,8 +22,8 @@ import {
 const HAND_SIZE = 10;
 
 const PRESET_REACTIONS = [
-  "😂", "👍", "👎", "😡", "😱", "🐮", "⚡", "🤔",
-  "GG", "Nice!", "Ouch", "Speed!", "Wait...", "Lucky"
+  "DLLM", "今鋪含撚喇", "104係唔係喺大哥度？", "今鋪我要食。", "俾我食啦",
+  "😂", "👍", "👎", "😡", "😱", "🐮", "⚡", "🤔"
 ];
 
 function App() {
@@ -106,6 +106,19 @@ function App() {
 
   useEffect(() => {
     initGame();
+  }, []);
+
+  // --- Chat Auto-Cleanup (5 Seconds) ---
+  useEffect(() => {
+    const timer = setInterval(() => {
+        const now = Date.now();
+        setChatMessages(prev => {
+            // Remove messages older than 5 seconds
+            const valid = prev.filter(m => now - m.timestamp < 5000);
+            return valid.length !== prev.length ? valid : prev;
+        });
+    }, 1000);
+    return () => clearInterval(timer);
   }, []);
 
   // --- UI Countdown Timer ---
@@ -256,6 +269,7 @@ function App() {
       setPlayers(updatedPlayers);
   };
 
+  // Accept explicit currentRows to prevent stale closures in Host logic
   const checkAllPlayersSelected = (currentPlayers: Player[], currentRows: GameRow[] = rows) => {
     const allSelected = currentPlayers.every(p => !!p.selectedCard && p.isReady);
     if (allSelected) {
@@ -263,6 +277,7 @@ function App() {
     }
   };
 
+  // Updated to accept currentRows
   const revealCards = async (currentPlayers: Player[], currentRows: GameRow[] = rows) => {
     setPhase(GamePhase.REVEAL);
     setTurnDeadline(0); 
@@ -290,14 +305,15 @@ function App() {
     }
 
     setTimeout(() => {
-      startResolving(turns, playersWithoutCards);
+      // FIX: Pass currentRows to startResolving to prevent using stale state from closure
+      startResolving(turns, playersWithoutCards, currentRows);
     }, 2000);
   };
 
-  const startResolving = (turns: {playerId: string, card: CardData}[], currentPlayers: Player[]) => {
+  const startResolving = (turns: {playerId: string, card: CardData}[], currentPlayers: Player[], currentRows: GameRow[] = rows) => {
     setPhase(GamePhase.RESOLVING);
     setResolvingIndex(0);
-    processNextTurn(0, turns, rows, currentPlayers);
+    processNextTurn(0, turns, currentRows, currentPlayers);
   };
 
   const processNextTurn = async (
@@ -325,6 +341,8 @@ function App() {
     setResolvingIndex(index);
     const turn = turns[index];
     const card = turn.card;
+    
+    // Use the explicitly passed currentRows for logic
     const rowIndex = findTargetRowIndex(card, currentRows);
 
     if (networkMode === NetworkMode.HOST) {
@@ -445,6 +463,7 @@ function App() {
     });
   };
 
+  // Updated to accept args
   const calculateScoresAndNextRound = (currentPlayers: Player[] = players, currentRows: GameRow[] = rows) => {
     const playersWithScores = currentPlayers.map(p => {
       const roundScore = calculateRoundScore(p, currentPlayers);
@@ -641,7 +660,6 @@ function App() {
 
                    // ALL YES -> NEXT ROUND
                    const humans = cur.players.filter(p => p.type === PlayerType.HUMAN);
-                   // Check if all humans have voted (and implicitly YES because we filter NO above)
                    if (humans.every(h => newVotes[h.id] === true)) {
                        setCurrentRound(r => r + 1);
                        // PASS FRESH PLAYERS AND CONFIG to avoid resetting to initial state
@@ -1095,7 +1113,7 @@ function App() {
                    ))}
                    {(!myPlayer?.hand || myPlayer.hand.length === 0) && (
                       <div className="text-slate-600 text-sm italic py-8 w-full text-center ml-12">
-                         {'No cards left'}
+                         {phase === GamePhase.LOBBY ? 'Waiting to start...' : 'No cards left'}
                       </div>
                    )}
                 </div>
@@ -1115,7 +1133,7 @@ function App() {
        {phase === GamePhase.ROUND_VOTING && (
            <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-10">
                <button 
-                 onClick={() => handleVoteNext(true)}
+                 onClick={handleVoteNext}
                  disabled={votes[myPlayerId]}
                  className={`
                     px-8 py-3 rounded-full font-bold text-lg shadow-2xl flex items-center gap-2 transition-transform active:scale-95
