@@ -176,22 +176,31 @@ export default function App() {
     if (!playerNameInput) return alert("Enter Name");
 
     try {
-      await peerService.init(); // Client needs peer instance too
+      // Re-init peer for client if needed
+      await peerService.init(); 
       setNetworkMode(NetworkMode.CLIENT);
       setUserMessage("Connecting to host...");
       
       await peerService.connectToHost(hostIdInput);
       
-      // Send join info
-      peerService.sendToHost({ 
-        type: 'PLAYER_JOINED', 
-        payload: { id: 'temp', name: playerNameInput } 
-      });
+      setUserMessage("Connected! Verifying...");
       
-      setUserMessage("Connected! Waiting for host to start...");
-    } catch (e) {
-      alert("Could not connect: " + e);
+      // CRITICAL STABILITY FIX:
+      // Wait 1 second for the WebRTC data channel to stabilize before sending data.
+      // Sending immediately can sometimes result in the message being lost if the channel isn't fully ready.
+      setTimeout(() => {
+        peerService.sendToHost({ 
+          type: 'PLAYER_JOINED', 
+          payload: { id: 'temp', name: playerNameInput } 
+        });
+        setUserMessage("Connected! Waiting for host to start...");
+      }, 1000);
+
+    } catch (e: any) {
+      console.error(e);
+      alert("Connection Failed: " + (e.message || e));
       setNetworkMode(NetworkMode.LOCAL);
+      setUserMessage("");
     }
   };
 

@@ -15,16 +15,19 @@ export class PeerService {
   // Initialize as Host or Client
   init(id?: string): Promise<string> {
     return new Promise((resolve, reject) => {
-      // Use Google's free STUN servers to help punch through NATs (Mobile/WiFi connections)
+      // Use a robust list of free STUN servers to help punch through NATs (Mobile/WiFi connections)
       this.peer = new Peer(id || '', {
         config: {
           iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
             { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478?transport=udp' }
           ]
         },
-        debug: 2 // Log errors/warnings
+        debug: 1 // Reduce debug noise unless critical
       });
 
       this.peer.on('open', (id) => {
@@ -42,7 +45,7 @@ export class PeerService {
 
       this.peer.on('error', (err) => {
         console.error('PeerJS Error:', err);
-        reject(err);
+        // Don't reject here immediately as some errors are non-fatal
       });
 
       this.peer.on('disconnected', () => {
@@ -57,11 +60,21 @@ export class PeerService {
       if (!this.peer) return reject('Peer not initialized');
 
       console.log('Attempting to connect to Host:', hostId);
+      
+      // Force JSON serialization for better compatibility
       const conn = this.peer.connect(hostId, {
-        reliable: true
+        reliable: true,
+        serialization: 'json'
       });
       
+      const timeout = setTimeout(() => {
+        if (!conn.open) {
+          reject(new Error('Connection timed out (Firewall/NAT issue). Try using same WiFi.'));
+        }
+      }, 10000);
+
       conn.on('open', () => {
+        clearTimeout(timeout);
         console.log('Connected to Host!');
         this.hostConnection = conn;
         this.setupConnectionEvents(conn);
@@ -69,16 +82,10 @@ export class PeerService {
       });
 
       conn.on('error', (err) => {
+        clearTimeout(timeout);
         console.error('Connection Error', err);
         reject(err);
       });
-      
-      // If connection hangs, timeout manually
-      setTimeout(() => {
-        if (!conn.open) {
-          // reject('Connection timeout'); // Optional: strict timeout
-        }
-      }, 5000);
     });
   }
 
@@ -102,7 +109,6 @@ export class PeerService {
 
   private setupConnectionEvents(conn: DataConnection) {
     conn.on('data', (data) => {
-      // console.log('Received data:', data);
       this.onMessage(data as NetworkMessage);
     });
 
