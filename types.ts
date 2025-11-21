@@ -25,6 +25,11 @@ export interface Player {
   selectedCard: CardData | null; // Card chosen for the current turn
   isConnected?: boolean; // For multiplayer status
   isReady?: boolean; // Optional ready state for toggle feature
+  lastReaction?: { // New: For emojis/chat
+    type: 'emoji' | 'text';
+    content: string;
+    timestamp: number;
+  };
 }
 
 export interface GameRow {
@@ -75,4 +80,5 @@ export type NetworkMessage =
   | { type: 'ACTION_SELECT_ROW'; payload: { rowIndex: number; playerId: string } }
   | { type: 'ACTION_VOTE_NEXT_ROUND'; payload: { vote: boolean; playerId: string } }
   | { type: 'ACTION_TOGGLE_READY'; payload: { isReady: boolean; playerId: string } }
+  | { type: 'ACTION_SEND_REACTION'; payload: { content: string; type: 'emoji' | 'text'; playerId: string } }
   | { type: 'PLAYER_JOINED'; payload: { id: string; name: string } };

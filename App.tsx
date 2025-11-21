@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Player, 
@@ -23,12 +24,14 @@ import { audioService } from './services/audioService';
 import GameBoard from './components/GameBoard';
 import Card from './components/Card';
 import ScoreBoard from './components/ScoreBoard';
-import { Users, Bot, Play, RotateCcw, Volume2, VolumeX, Loader2, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
+import { Users, Bot, Play, RotateCcw, Volume2, VolumeX, Loader2, CheckCircle2, XCircle, AlertTriangle, MessageSquare, Send } from 'lucide-react';
 
 const DEFAULT_CONFIG: GameConfig = {
   maxRounds: 10, // Not strictly used with voting logic
   totalPlayers: 4
 };
+
+const PRESET_EMOJIS = ["👍", "👎", "😂", "😭", "😡", "🐮", "⚡", "💀", "🎉", "🤔"];
 
 const App: React.FC = () => {
   // --- Game State ---
@@ -50,6 +53,8 @@ const App: React.FC = () => {
   const [isScoreBoardOpen, setIsScoreBoardOpen] = useState<boolean>(false);
   const [takingRowIndex, setTakingRowIndex] = useState<number>(-1); // -1 means no animation
   const [votes, setVotes] = useState<Record<string, boolean>>({}); // For voting next round
+  const [isChatOpen, setIsChatOpen] = useState<boolean>(false);
+  const [chatInput, setChatInput] = useState<string>("");
 
   // Audio State
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -63,6 +68,9 @@ const App: React.FC = () => {
   const [clientName, setClientName] = useState<string>('Player');
   const [isJoining, setIsJoining] = useState<boolean>(false);
   const [isConnected, setIsConnected] = useState<boolean>(false);
+
+  // Reaction Cleanup Refs
+  const reactionTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   // Initialize Audio & ID on mount
   useEffect(() => {
@@ -189,6 +197,10 @@ const App: React.FC = () => {
       case 'ACTION_VOTE_NEXT_ROUND':
         handleVote(msg.payload.playerId, msg.payload.vote);
         break;
+
+      case 'ACTION_SEND_REACTION':
+        handleReceiveReaction(msg.payload.playerId, msg.payload.content, msg.payload.type);
+        break;
     }
   };
 
@@ -295,7 +307,8 @@ const App: React.FC = () => {
       hand: deck.splice(0, 10).sort((a, b) => a.id - b.id),
       collectedCards: [], // Reset collected for the round
       selectedCard: null,
-      isReady: false // Reset ready state
+      isReady: false, // Reset ready state
+      lastReaction: undefined // Clear reactions
     }));
 
     // Deal 4 rows of 1 card each
@@ -367,6 +380,51 @@ const App: React.FC = () => {
       if (p.id === playerId) return { ...p, isReady };
       return p;
     }));
+  };
+
+  const handleSendReaction = (content: string, type: 'emoji' | 'text') => {
+    if (networkMode === NetworkMode.CLIENT) {
+      firebaseService.sendAction(roomId, {
+        type: 'ACTION_SEND_REACTION',
+        payload: { content, type, playerId: myPlayerId }
+      });
+    } else {
+      // Host logic for self
+      handleReceiveReaction(myPlayerId, content, type);
+    }
+    // Close chat after sending
+    setIsChatOpen(false);
+    setChatInput("");
+  };
+
+  const handleReceiveReaction = (playerId: string, content: string, type: 'emoji' | 'text') => {
+    // 1. Update player state with reaction
+    setPlayers(prev => prev.map(p => {
+      if (p.id === playerId) {
+        return { ...p, lastReaction: { type, content, timestamp: Date.now() } };
+      }
+      return p;
+    }));
+
+    if (type === 'emoji') audioService.playClick();
+
+    // 2. Schedule cleanup (Host Only manages cleanup to ensure sync)
+    // In Local mode, we are host. In Network Host, we are host.
+    // Clients just receive the state update from Host.
+    if (networkMode !== NetworkMode.CLIENT) {
+      if (reactionTimeouts.current[playerId]) {
+        clearTimeout(reactionTimeouts.current[playerId]);
+      }
+
+      reactionTimeouts.current[playerId] = setTimeout(() => {
+         setPlayers(prev => prev.map(p => {
+            if (p.id === playerId) {
+               return { ...p, lastReaction: undefined };
+            }
+            return p;
+         }));
+      }, 5000);
+    }
   };
 
   // Check if all players are ready to reveal
@@ -466,6 +524,10 @@ const App: React.FC = () => {
 
     // Host checks validity
     if (phase !== GamePhase.CHOOSING_ROW) return;
+    
+    // Safety check to ensure turnCards is populated
+    if (!turnCards || turnCards.length === 0 || resolvingIndex >= turnCards.length) return;
+
     const activePlayerId = turnCards[resolvingIndex].playerId;
     if (activePlayerId !== playerId) return;
 
@@ -649,17 +711,20 @@ const App: React.FC = () => {
                       onChange={(e) => setConfig({...config, totalPlayers: Number(e.target.value)})}
                       className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2"
                     >
-                      {[4,5,6,7,8].map(n => <option key={n} value={n}>{n}</option>)}
+                      {[2,3,4,5,6,7,8].map(n => <option key={n} value={n}>{n}</option>)}
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm text-slate-400 mb-1">Humans</label>
+                    <label className="block text-sm text-slate-400 mb-1">Bots</label>
                     <select 
-                      value={numHumans} 
-                      onChange={(e) => setNumHumans(Number(e.target.value))}
+                      value={config.totalPlayers - numHumans} 
+                      onChange={(e) => {
+                        const bots = Number(e.target.value);
+                        setNumHumans(config.totalPlayers - bots);
+                      }}
                       className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2"
                     >
-                      {Array.from({length: config.totalPlayers}, (_, i) => i + 1).map(n => (
+                      {Array.from({length: config.totalPlayers}, (_, i) => i).map(n => (
                         <option key={n} value={n}>{n}</option>
                       ))}
                     </select>
@@ -667,7 +732,7 @@ const App: React.FC = () => {
                 </div>
 
                 <div className="text-sm text-slate-500 flex items-center gap-2">
-                  <Bot size={16} /> Auto-filling {config.totalPlayers - numHumans} Bots
+                  <Users size={16} /> Humans: {numHumans}
                 </div>
 
                 <div className="flex gap-2 pt-4">
@@ -801,7 +866,7 @@ const App: React.FC = () => {
                <div 
                   key={p.id} 
                   className={`
-                    flex items-center gap-1 px-2 py-1 rounded text-xs font-bold whitespace-nowrap border
+                    relative flex items-center gap-1 px-2 py-1 rounded text-xs font-bold whitespace-nowrap border
                     ${p.id === resolvingPlayerName ? 'bg-yellow-500/20 border-yellow-500 text-yellow-200' : 'bg-slate-800 border-slate-700 text-slate-400'}
                     ${p.isReady ? 'border-green-500/50' : ''}
                   `}
@@ -809,6 +874,15 @@ const App: React.FC = () => {
                   {p.isReady && <CheckCircle2 size={10} className="text-green-400" />}
                   {p.name}
                   <span className="bg-slate-900 px-1 rounded text-slate-500">{p.totalScore}</span>
+
+                  {/* Chat Bubble Overlay */}
+                  {p.lastReaction && (
+                    <div className="absolute -bottom-10 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-top-2 fade-in duration-200">
+                      <div className="bg-white text-slate-900 px-3 py-1.5 rounded-xl rounded-tr-none shadow-xl font-medium text-sm whitespace-nowrap border-2 border-slate-200 flex items-center justify-center min-w-[40px]">
+                        {p.lastReaction.content}
+                      </div>
+                    </div>
+                  )}
                </div>
              ))}
            </div>
@@ -893,6 +967,53 @@ const App: React.FC = () => {
               </div>
            </div>
          )}
+
+         {/* Chat Button & Popover */}
+         <div className="absolute bottom-24 sm:bottom-32 right-4 z-50">
+            {isChatOpen && (
+               <div className="absolute bottom-14 right-0 w-64 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl p-3 animate-in slide-in-from-bottom-5 fade-in">
+                  <div className="grid grid-cols-5 gap-2 mb-3">
+                    {PRESET_EMOJIS.map(emoji => (
+                      <button
+                        key={emoji}
+                        onClick={() => handleSendReaction(emoji, 'emoji')}
+                        className="text-xl hover:bg-slate-700 p-1 rounded transition-colors"
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                  <form 
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (chatInput.trim()) handleSendReaction(chatInput, 'text');
+                    }}
+                    className="flex gap-2"
+                  >
+                    <input 
+                      type="text"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      maxLength={20}
+                      placeholder="Say something..."
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
+                    />
+                    <button type="submit" className="bg-blue-600 p-1.5 rounded hover:bg-blue-500">
+                      <Send size={14} />
+                    </button>
+                  </form>
+               </div>
+            )}
+            <button 
+              onClick={() => setIsChatOpen(!isChatOpen)}
+              className={`
+                w-12 h-12 rounded-full shadow-lg flex items-center justify-center transition-all
+                ${isChatOpen ? 'bg-blue-600 text-white rotate-45' : 'bg-slate-700 text-slate-300 hover:bg-slate-600 hover:text-white'}
+              `}
+            >
+               {isChatOpen ? <XCircle size={24} /> : <MessageSquare size={24} />}
+            </button>
+         </div>
 
          {/* Player Hand Area */}
          <div className="mt-auto bg-slate-900/80 border-t border-slate-800 pt-8 pb-4 sm:pb-8 px-2 sm:px-4 backdrop-blur-md relative z-30">
