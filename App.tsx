@@ -16,7 +16,7 @@ import { audioService } from './services/audioService';
 import { firebaseService } from './services/firebaseService';
 import { 
   Copy, Play, Users, Volume2, VolumeX, Zap, LogOut, Loader, PlayCircle,
-  MessageSquare, Send, Smile, X, Check, RefreshCcw, Clock, AlarmClock, Trophy
+  MessageSquare, Send, Smile, X, Check, RefreshCcw, Clock, AlarmClock, Trophy, User
 } from 'lucide-react';
 
 const MAX_ROUNDS = 10;
@@ -54,9 +54,15 @@ function App() {
   
   // Refs for Logic Optimization
   const thinkingBotsRef = useRef<Set<string>>(new Set());
+  
+  // Reference to latest state for Event Handlers (to avoid dependency loops)
+  const gameStateRef = useRef<GameState>({
+      players: [], rows: [], phase: GamePhase.LOBBY, currentRound: 1, activePlayerId: null,
+      turnCards: [], resolvingIndex: -1, userMessage: "", votes: {}, takingRowIndex: -1,
+      turnDeadline: 0, chatMessages: []
+  });
 
   const [myPlayerId, setMyPlayerId] = useState<string>(() => {
-      // Persist ID to handle refreshes better
       const saved = localStorage.getItem('cow_king_pid');
       return saved || "";
   });
@@ -74,6 +80,14 @@ function App() {
       if (myPlayerId) localStorage.setItem('cow_king_pid', myPlayerId);
   }, [myPlayerId]);
 
+  // Sync Refs with State
+  useEffect(() => {
+      gameStateRef.current = {
+          players, rows, phase, currentRound, activePlayerId, turnCards,
+          resolvingIndex, userMessage, votes, takingRowIndex, turnDeadline, chatMessages
+      };
+  }, [players, rows, phase, currentRound, activePlayerId, turnCards, resolvingIndex, userMessage, votes, takingRowIndex, turnDeadline, chatMessages]);
+
   // --- Game Logic ---
 
   const initGame = () => {
@@ -83,16 +97,14 @@ function App() {
     thinkingBotsRef.current.clear();
   };
 
-  // Run once on mount
   useEffect(() => {
     initGame();
   }, []);
 
-  // --- UI Countdown Timer (Separate from Game Logic) ---
+  // --- UI Countdown Timer ---
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
     
-    // Timer runs in CHOICE phase AND CHOOSING_ROW phase
     if (turnDeadline > 0 && (phase === GamePhase.PLAYER_CHOICE || phase === GamePhase.CHOOSING_ROW)) {
       const updateTimer = () => {
         const now = Date.now();
@@ -100,10 +112,7 @@ function App() {
         setTimeLeft(remaining);
       };
       
-      // Update immediately
       updateTimer();
-      
-      // Update frequently to catch the second change cleanly
       interval = setInterval(updateTimer, 200);
     } else {
       setTimeLeft(0);
@@ -115,17 +124,14 @@ function App() {
   }, [turnDeadline, phase]);
 
   const startRound = () => {
-    // Fill Bots logic
     let currentPlayers = [...players];
     const totalNeeded = hostConfig.totalPlayers;
     
-    // If Local mode, ensure we have the right amount of humans
     if (networkMode === NetworkMode.LOCAL) {
         const humansNeeded = Math.min(hostConfig.localHumans, totalNeeded);
         const botsNeeded = totalNeeded - humansNeeded;
         currentPlayers = [];
         
-        // Add Humans
         for(let i=0; i<humansNeeded; i++) {
             currentPlayers.push({
                 id: i===0 ? myPlayerId || 'p1' : `p${i+1}`,
@@ -134,7 +140,6 @@ function App() {
                 hand: [], collectedCards: [], scoreHistory: [], totalScore: 0, selectedCard: null, isReady: false
             });
         }
-        // Add Bots
         for(let i=0; i<botsNeeded; i++) {
             currentPlayers.push({
                 id: `bot-${i}`,
@@ -144,7 +149,6 @@ function App() {
             });
         }
     } else if (networkMode === NetworkMode.HOST) {
-        // Host Online: Fill remaining slots with bots
         const existingCount = currentPlayers.length;
         const botsNeeded = Math.max(0, totalNeeded - existingCount);
         for(let i=0; i<botsNeeded; i++) {
@@ -158,17 +162,14 @@ function App() {
     }
 
     const deck = shuffleDeck(generateDeck());
-    
-    // Deal cards
     const newPlayers = currentPlayers.map(p => ({
       ...p,
       hand: deck.splice(0, HAND_SIZE).sort((a, b) => a.id - b.id),
-      collectedCards: [], // Clear collected for new round
+      collectedCards: [],
       selectedCard: null,
       isReady: false
     }));
 
-    // Setup Rows
     const newRows: GameRow[] = [];
     for (let i = 0; i < 4; i++) {
       newRows.push({ cards: [deck.shift()!] });
@@ -186,22 +187,16 @@ function App() {
     
     audioService.playFanfare();
     
-    // If networked host, sync state
     if (networkMode === NetworkMode.HOST) {
        syncState(newPlayers, newRows, GamePhase.PLAYER_CHOICE);
     }
   };
 
-  // 1. Select Card (Local Only initially)
   const handleCardSelect = (card: CardData) => {
     if (phase !== GamePhase.PLAYER_CHOICE) return;
-    
     const me = getMyPlayer();
-    if (!me) return;
-    // If already ready, cannot change
-    if (me.isReady) return;
+    if (!me || me.isReady) return;
 
-    // Just update local state selection, do NOT confirm yet
     const updatedPlayers = players.map(p => 
       p.id === myPlayerId ? { ...p, selectedCard: card } : p
     );
@@ -209,7 +204,6 @@ function App() {
     audioService.playSelect();
   };
 
-  // 2. Confirm Selection
   const confirmSelection = () => {
      const me = getMyPlayer();
      if (!me || !me.selectedCard) return;
@@ -220,7 +214,6 @@ function App() {
      setPlayers(updatedPlayers);
      audioService.playClick();
 
-     // Now send to network or check all
      if (networkMode === NetworkMode.LOCAL) {
         checkAllPlayersSelected(updatedPlayers);
      } else if (networkMode === NetworkMode.CLIENT) {
@@ -230,12 +223,10 @@ function App() {
         });
      } else if (networkMode === NetworkMode.HOST) {
         checkAllPlayersSelected(updatedPlayers);
-        // Also sync my confirmation to clients
         syncState(updatedPlayers);
      }
   };
 
-  // 3. Cancel Selection
   const cancelSelection = () => {
       const me = getMyPlayer();
       if (!me || me.isReady) return;
@@ -247,7 +238,6 @@ function App() {
   };
 
   const checkAllPlayersSelected = (currentPlayers: Player[]) => {
-    // CRITICAL: Check both selectedCard AND isReady
     const allSelected = currentPlayers.every(p => !!p.selectedCard && p.isReady);
     if (allSelected) {
        revealCards(currentPlayers);
@@ -260,7 +250,6 @@ function App() {
     thinkingBotsRef.current.clear();
     audioService.playAlert();
 
-    // Prepare turn order
     const turns = currentPlayers.map(p => ({
       playerId: p.id,
       card: p.selectedCard!
@@ -268,11 +257,10 @@ function App() {
 
     setTurnCards(turns);
     
-    // Remove cards from hands
     const playersWithoutCards = currentPlayers.map(p => ({
       ...p,
       hand: p.hand.filter(c => c.id !== p.selectedCard!.id),
-      selectedCard: null, // Clear selection
+      selectedCard: null,
       isReady: false
     }));
     setPlayers(playersWithoutCards);
@@ -281,7 +269,6 @@ function App() {
        syncState(playersWithoutCards, rows, GamePhase.REVEAL, turns);
     }
 
-    // Wait a bit then start resolving
     setTimeout(() => {
       startResolving(turns, playersWithoutCards);
     }, 2000);
@@ -300,7 +287,6 @@ function App() {
     currentPlayers: Player[]
   ) => {
     if (index >= turns.length) {
-      // Round End Check
       if (currentPlayers[0].hand.length === 0) {
         calculateScoresAndNextRound();
       } else {
@@ -325,16 +311,13 @@ function App() {
        syncState(currentPlayers, currentRows, GamePhase.RESOLVING, turns, index);
     }
 
-    // Case 1: Card fits in a row
     if (rowIndex !== -1) {
       const targetRow = currentRows[rowIndex];
       
-      // Case 1a: Row is full (5 cards) -> Take row
       if (targetRow.cards.length >= 5) {
         setActivePlayerId(turn.playerId);
         await animateTakingRow(rowIndex, turn.playerId, currentPlayers, currentRows);
         
-        // Update state after taking row
         const updatedPlayers = [...currentPlayers];
         const playerIdx = updatedPlayers.findIndex(p => p.id === turn.playerId);
         updatedPlayers[playerIdx].collectedCards = [
@@ -343,7 +326,7 @@ function App() {
         ];
 
         const updatedRows = [...currentRows];
-        updatedRows[rowIndex] = { cards: [card] }; // Replace row with new card
+        updatedRows[rowIndex] = { cards: [card] };
 
         setPlayers(updatedPlayers);
         setRows(updatedRows);
@@ -352,7 +335,6 @@ function App() {
         setTimeout(() => processNextTurn(index + 1, turns, updatedRows, updatedPlayers), 1000);
 
       } else {
-        // Case 1b: Just add card
         const updatedRows = [...currentRows];
         updatedRows[rowIndex] = { cards: [...targetRow.cards, card] };
         
@@ -362,10 +344,9 @@ function App() {
         setTimeout(() => processNextTurn(index + 1, turns, updatedRows, currentPlayers), 1000);
       }
     } else {
-      // Case 2: Card is too low -> Must choose row
+      // Card too low -> Choose Row
       setActivePlayerId(turn.playerId);
       setPhase(GamePhase.CHOOSING_ROW);
-      // START TIMER FOR ROW SELECTION
       setTurnDeadline(hostConfig.turnDuration > 0 ? Date.now() + (hostConfig.turnDuration * 1000) : 0);
       audioService.playAlert();
       
@@ -373,7 +354,6 @@ function App() {
           syncState(currentPlayers, currentRows, GamePhase.CHOOSING_ROW, turns, index, turn.playerId);
       }
 
-      // If Bot, make decision
       const player = currentPlayers.find(p => p.id === turn.playerId);
       if (player && player.type === PlayerType.BOT && networkMode !== NetworkMode.CLIENT) {
         const chosenRowIndex = await getBotRowChoice(player, currentRows);
@@ -394,10 +374,8 @@ function App() {
     const turn = currentTurns[currentIndex];
     if (!turn) return;
 
-    // Clear timer
     setTurnDeadline(0);
 
-    // Animation
     await animateTakingRow(rowIndex, turn.playerId, currentPlayers, currentRows);
 
     const updatedPlayers = [...currentPlayers];
@@ -419,7 +397,6 @@ function App() {
     setTimeout(() => processNextTurn(currentIndex + 1, currentTurns, updatedRows, updatedPlayers), 1000);
   };
 
-  // Wrapper for UI interaction
   const onUserSelectRow = (rowIndex: number) => {
     if (phase !== GamePhase.CHOOSING_ROW) return;
     if (activePlayerId !== myPlayerId) return;
@@ -449,7 +426,6 @@ function App() {
   };
 
   const calculateScoresAndNextRound = () => {
-    // Calculate scores with new players state
     const playersWithScores = players.map(p => {
       const roundScore = calculateRoundScore(p, players);
       const collected = p.collectedCards || [];
@@ -462,41 +438,37 @@ function App() {
 
     setPlayers(playersWithScores);
     setIsScoreBoardOpen(true);
-    setPhase(GamePhase.ROUND_VOTING); // Enter Voting Phase
+    setPhase(GamePhase.ROUND_VOTING); 
     setVotes({});
-    setTurnDeadline(0); // Stop timer
+    setTurnDeadline(0); 
     
     if (networkMode === NetworkMode.HOST) {
         syncState(playersWithScores, rows, GamePhase.ROUND_VOTING);
     }
   };
   
-  const handleVoteNext = () => {
-    const newVotes = { ...votes, [myPlayerId]: true };
+  const handleVoteNext = (vote: boolean) => {
+    const newVotes = { ...votes, [myPlayerId]: vote };
     setVotes(newVotes);
     
     if (networkMode === NetworkMode.LOCAL) {
-        // In local, one vote is enough
-        if (currentRound >= MAX_ROUNDS) {
-            setPhase(GamePhase.GAME_END);
-        } else {
+        if (vote) {
             setCurrentRound(r => r + 1);
             startRound();
+        } else {
+            setPhase(GamePhase.GAME_END);
         }
     } else if (networkMode === NetworkMode.CLIENT) {
         firebaseService.sendAction(roomId, {
             type: 'ACTION_VOTE_NEXT_ROUND',
-            payload: { vote: true, playerId: myPlayerId }
+            payload: { vote, playerId: myPlayerId }
         });
     }
   };
 
-  // --- Chat & Reactions ---
-
   const handleSendReaction = (content: string, type: 'text' | 'emoji') => {
     if (!myPlayerId) return;
     
-    // Add locally immediately
     const newMsg: ChatMessage = {
       id: Math.random().toString(),
       playerId: myPlayerId,
@@ -506,9 +478,10 @@ function App() {
       timestamp: Date.now()
     };
     
-    // Keep only last 7 messages
-    setChatMessages(prev => [...prev, newMsg].slice(-7));
-    setIsChatOpen(false); // Close popover
+    // Keep only last 7 messages locally immediately
+    const updatedMessages = [...chatMessages, newMsg].slice(-7);
+    setChatMessages(updatedMessages);
+    setIsChatOpen(false);
 
     if (networkMode === NetworkMode.CLIENT) {
         firebaseService.sendAction(roomId, {
@@ -516,8 +489,8 @@ function App() {
             payload: { content, type, playerId: myPlayerId }
         });
     } else if (networkMode === NetworkMode.HOST) {
-        // Host adds to sync state
-        syncState(players, rows, phase, turnCards, resolvingIndex, activePlayerId, [...chatMessages, newMsg].slice(-7));
+        // Host adds to sync state directly
+        syncState(players, rows, phase, turnCards, resolvingIndex, activePlayerId, updatedMessages);
     }
   };
 
@@ -530,13 +503,16 @@ function App() {
         if (Date.now() > turnDeadline) {
             setTurnDeadline(0); // Stop checking immediately
 
+            // Use REF for current state to avoid stale closures
+            const currentPlayers = gameStateRef.current.players;
+            const currentPhase = gameStateRef.current.phase;
+
             // PHASE: PLAYER CHOICE
-            if (phase === GamePhase.PLAYER_CHOICE) {
+            if (currentPhase === GamePhase.PLAYER_CHOICE) {
                 setPlayers(prev => {
                    let changed = false;
                    const updated = prev.map(p => {
                        if (!p.isReady) {
-                           // Random pick
                            const cardToPlay = p.selectedCard || p.hand[Math.floor(Math.random() * p.hand.length)];
                            changed = true;
                            return { ...p, selectedCard: cardToPlay, isReady: true };
@@ -544,20 +520,16 @@ function App() {
                        return p;
                    });
                    if (changed) {
-                       if (networkMode === NetworkMode.LOCAL) checkAllPlayersSelected(updated);
-                       else if (networkMode === NetworkMode.HOST) {
-                           checkAllPlayersSelected(updated);
-                           syncState(updated);
-                       }
+                       checkAllPlayersSelected(updated);
+                       if (networkMode === NetworkMode.HOST) syncState(updated);
                    }
                    return updated;
                 });
             } 
             // PHASE: CHOOSING ROW - Force random selection
-            else if (phase === GamePhase.CHOOSING_ROW) {
+            else if (currentPhase === GamePhase.CHOOSING_ROW) {
                 const randomRowIndex = Math.floor(Math.random() * 4);
                 handleRowSelect(randomRowIndex);
-                // handleRowSelect already syncs state via processNextTurn
             }
         }
     }, 1000);
@@ -566,40 +538,29 @@ function App() {
 
   // --- Bot AI Loop ---
   useEffect(() => {
-    // Only run bots if Host or Local, and in Choice Phase
-    if (phase !== GamePhase.PLAYER_CHOICE || networkMode === NetworkMode.CLIENT) return;
+    if (networkMode === NetworkMode.CLIENT) return;
 
-    const botsToMove = players.filter(p => 
-        p.type === PlayerType.BOT && !p.isReady && !thinkingBotsRef.current.has(p.id)
-    );
+    // Bot Card Choice
+    if (phase === GamePhase.PLAYER_CHOICE) {
+        const botsToMove = players.filter(p => 
+            p.type === PlayerType.BOT && !p.isReady && !thinkingBotsRef.current.has(p.id)
+        );
+        if (botsToMove.length === 0) return;
 
-    if (botsToMove.length === 0) return;
-
-    botsToMove.forEach(async (bot) => {
-        thinkingBotsRef.current.add(bot.id);
-        
-        // Speed Up: Reduce wait time for better responsiveness (0.2s - 1.2s)
-        await new Promise(r => setTimeout(r, Math.random() * 1000 + 200));
-        
-        const card = await getBotDecision(bot, rows, []);
-        
-        setPlayers(prev => {
-            const idx = prev.findIndex(p => p.id === bot.id);
-            // Bot might have been forced by timer already, check again
-            if (idx === -1 || prev[idx].isReady) return prev;
-            
-            const newPlayers = [...prev];
-            newPlayers[idx] = { ...newPlayers[idx], selectedCard: card, isReady: true };
-            
-            // Check if all ready
-            if (networkMode === NetworkMode.LOCAL) checkAllPlayersSelected(newPlayers);
-            else if (networkMode === NetworkMode.HOST) checkAllPlayersSelected(newPlayers);
-            
-            return newPlayers;
+        botsToMove.forEach(async (bot) => {
+            thinkingBotsRef.current.add(bot.id);
+            await new Promise(r => setTimeout(r, Math.random() * 1000 + 200));
+            const card = await getBotDecision(bot, rows, []);
+            setPlayers(prev => {
+                const idx = prev.findIndex(p => p.id === bot.id);
+                if (idx === -1 || prev[idx].isReady) return prev;
+                const newPlayers = [...prev];
+                newPlayers[idx] = { ...newPlayers[idx], selectedCard: card, isReady: true };
+                if (networkMode === NetworkMode.LOCAL || networkMode === NetworkMode.HOST) checkAllPlayersSelected(newPlayers);
+                return newPlayers;
+            });
         });
-        // Note: We don't need to remove from thinkingBotsRef because they are now ready and won't be picked up by filter
-    });
-
+    }
   }, [phase, players, rows, networkMode]);
 
   // --- Networking ---
@@ -621,10 +582,14 @@ function App() {
       firebaseService.updateGameState(roomId, state);
   };
 
-  // Host Logic
+  // Host Logic - FIXED to prevent duplicate listeners
   useEffect(() => {
     if (networkMode === NetworkMode.HOST && roomId) {
-        firebaseService.subscribeToActions(roomId, (msg) => {
+        console.log("Host subscribing to actions...");
+        const unsubscribe = firebaseService.subscribeToActions(roomId, (msg) => {
+            // Use REF to get latest state inside the callback without re-subscribing
+            const cur = gameStateRef.current;
+            
             if (msg.type === 'ACTION_SELECT_CARD') {
                 setPlayers(prev => {
                     const updated = prev.map(p => p.id === msg.payload.playerId ? { ...p, selectedCard: msg.payload.card, isReady: true } : p);
@@ -635,34 +600,39 @@ function App() {
                 handleRowSelect(msg.payload.rowIndex);
             } else if (msg.type === 'ACTION_VOTE_NEXT_ROUND') {
                 setVotes(prev => {
-                   const newVotes = { ...prev, [msg.payload.playerId]: true };
-                   const humans = players.filter(p => p.type === PlayerType.HUMAN);
-                   if (humans.every(h => newVotes[h.id])) {
-                       if (currentRound >= MAX_ROUNDS) {
-                           setPhase(GamePhase.GAME_END);
-                           syncState(players, rows, GamePhase.GAME_END);
-                       } else {
-                           setCurrentRound(r => r + 1);
-                           startRound();
-                       }
+                   const newVotes = { ...prev, [msg.payload.playerId]: msg.payload.vote };
+                   
+                   // Check if anyone voted NO -> Game Over
+                   if (msg.payload.vote === false) {
+                       setPhase(GamePhase.GAME_END);
+                       syncState(cur.players, cur.rows, GamePhase.GAME_END);
+                       return newVotes;
+                   }
+
+                   // Check if ALL humans voted YES -> Next Round
+                   const humans = cur.players.filter(p => p.type === PlayerType.HUMAN);
+                   if (humans.every(h => newVotes[h.id] === true)) {
+                       setCurrentRound(r => r + 1);
+                       startRound();
                    }
                    return newVotes;
                 });
             } else if (msg.type === 'ACTION_SEND_REACTION') {
-                setChatMessages(prev => {
-                    const newMsg: ChatMessage = {
-                        id: Math.random().toString(),
-                        playerId: msg.payload.playerId,
-                        playerName: players.find(p => p.id === msg.payload.playerId)?.name || 'Unknown',
-                        content: msg.payload.content,
-                        type: msg.payload.type,
-                        timestamp: Date.now()
-                    };
-                    const updated = [...prev, newMsg].slice(-7);
-                    // Host syncs this back to everyone
-                    syncState(players, rows, phase, turnCards, resolvingIndex, activePlayerId, updated);
-                    return updated;
-                });
+                // Correctly append to CURRENT state history
+                const newMsg: ChatMessage = {
+                    id: Math.random().toString(),
+                    playerId: msg.payload.playerId,
+                    playerName: cur.players.find(p => p.id === msg.payload.playerId)?.name || 'Unknown',
+                    content: msg.payload.content,
+                    type: msg.payload.type,
+                    timestamp: Date.now()
+                };
+                const updated = [...cur.chatMessages, newMsg].slice(-7);
+                
+                // Update local state
+                setChatMessages(updated);
+                // Sync global state
+                syncState(cur.players, cur.rows, cur.phase, cur.turnCards, cur.resolvingIndex, cur.activePlayerId, updated);
             } else if (msg.type === 'PLAYER_JOINED') {
                 setPlayers(prev => {
                     if (prev.some(p => p.id === msg.payload.id)) return prev;
@@ -675,8 +645,10 @@ function App() {
                 });
             }
         });
+        
+        return () => unsubscribe();
     }
-  }, [networkMode, roomId, players, rows, phase, resolvingIndex, turnCards, chatMessages]);
+  }, [networkMode, roomId]); // Dependencies minimal -> only runs once when hosting starts
 
   // Client Logic
   useEffect(() => {
@@ -711,6 +683,20 @@ function App() {
                  <h2 className="text-2xl font-bold text-emerald-400 mb-4 flex items-center gap-2">
                      <PlayCircle /> Local / Solo
                  </h2>
+                 
+                 {/* NAME INPUT */}
+                 <div className="mb-6">
+                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1 flex items-center gap-1">
+                        <User size={14}/> Your Name
+                    </label>
+                    <input 
+                        className="w-full bg-slate-900 border border-slate-600 text-white p-3 rounded-lg focus:border-emerald-500 focus:outline-none"
+                        value={myName}
+                        onChange={(e) => setMyName(e.target.value)}
+                        placeholder="Enter your name"
+                    />
+                 </div>
+
                  <div className="space-y-4">
                      <div>
                          <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Total Players</label>
@@ -757,6 +743,20 @@ function App() {
                  
                  {!roomId ? (
                      <div className="space-y-6">
+                         
+                         {/* NAME INPUT */}
+                         <div className="mb-2">
+                            <label className="block text-xs font-bold text-slate-500 uppercase mb-1 flex items-center gap-1">
+                                <User size={14}/> Your Name
+                            </label>
+                            <input 
+                                className="w-full bg-slate-900 border border-slate-600 text-white p-3 rounded-lg focus:border-blue-500 focus:outline-none"
+                                value={myName}
+                                onChange={(e) => setMyName(e.target.value)}
+                                placeholder="Enter your name"
+                            />
+                         </div>
+
                          <div className="p-4 bg-slate-900 rounded-lg border border-slate-700">
                              <h3 className="text-white font-bold mb-2">Create Room</h3>
                              <div className="flex gap-4 mb-3">
@@ -769,7 +769,7 @@ function App() {
                                   >
                                       {[2,3,4,5,6,7,8].map(n => <option key={n} value={n}>{n} Players</option>)}
                                   </select>
-                                </div>
+                               </div>
                                <div className="flex-1">
                                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Turn Timer</label>
                                   <select 
@@ -869,15 +869,6 @@ function App() {
                      </div>
                  )}
              </div>
-         </div>
-         
-         <div className="fixed bottom-4 text-slate-600 text-xs">
-             Your Name: 
-             <input 
-                className="bg-transparent border-b border-slate-600 text-slate-400 ml-2 focus:outline-none focus:border-slate-400"
-                value={myName}
-                onChange={(e) => setMyName(e.target.value)}
-             />
          </div>
       </div>
     );

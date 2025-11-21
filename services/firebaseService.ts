@@ -53,10 +53,11 @@ export class FirebaseService {
   }
 
   // Listen for actions from clients (Host only)
-  subscribeToActions(roomId: string, callback: (msg: NetworkMessage) => void) {
+  // RETURNS: Unsubscribe function
+  subscribeToActions(roomId: string, callback: (msg: NetworkMessage) => void): () => void {
     const actionsRef = ref(db, `rooms/${roomId}/actions`);
     
-    onChildAdded(actionsRef, (snapshot) => {
+    const listener = onChildAdded(actionsRef, (snapshot) => {
       const val = snapshot.val();
       if (val) {
         callback(val as NetworkMessage);
@@ -64,6 +65,9 @@ export class FirebaseService {
         remove(snapshot.ref).catch(e => console.error("Remove Action Error:", e)); 
       }
     });
+
+    // Return cleanup function
+    return () => off(actionsRef, 'child_added', listener);
   }
 
   // --- CLIENT METHODS ---
