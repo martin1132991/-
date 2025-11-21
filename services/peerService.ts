@@ -1,3 +1,4 @@
+
 import { Peer, DataConnection } from 'peerjs';
 import { NetworkMessage } from '../types';
 
@@ -15,8 +16,12 @@ export class PeerService {
   // Initialize as Host or Client
   init(id?: string): Promise<string> {
     return new Promise((resolve, reject) => {
+      // Determine if we are on HTTPS. If so, PeerJS must use secure: true
+      const isSecure = typeof window !== 'undefined' && window.location.protocol === 'https:';
+
       // Use a robust list of free STUN servers to help punch through NATs (Mobile/WiFi connections)
       this.peer = new Peer(id || '', {
+        secure: isSecure, // CRITICAL FIX FOR VERCEL/HTTPS
         config: {
           iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },

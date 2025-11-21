@@ -20,10 +20,11 @@ import {
 } from './services/gameLogic';
 import { getBotDecision, getBotRowChoice } from './services/aiService';
 import { peerService } from './services/peerService';
+import { audioService } from './services/audioService';
 import Card from './components/Card';
 import GameBoard from './components/GameBoard';
 import ScoreBoard from './components/ScoreBoard';
-import { Trophy, Users, Play, RotateCw, Skull, Eye, EyeOff, BarChart3, AlertTriangle, Bot, Wifi, Copy, Smartphone, ThumbsUp, ThumbsDown, CheckCircle, XCircle } from 'lucide-react';
+import { Trophy, Users, Play, RotateCw, Skull, Eye, EyeOff, BarChart3, AlertTriangle, Bot, Wifi, Copy, Smartphone, ThumbsUp, ThumbsDown, CheckCircle, XCircle, Volume2, VolumeX } from 'lucide-react';
 
 const INITIAL_CONFIG: GameConfig = {
   maxRounds: 10,
@@ -59,10 +60,35 @@ export default function App() {
   
   // UI State
   const [isScoreBoardOpen, setIsScoreBoardOpen] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
   
   // Refs for Logic Safety
   const processingRef = useRef(false); // Prevent multiple bot triggers
   const lastProcessedIndexRef = useRef<number>(-1); // Prevent double-processing of resolution steps
+
+  // --- Audio Effects Integration ---
+  useEffect(() => {
+    if (takingRowIndex !== -1) {
+      audioService.playTakeRow();
+    }
+  }, [takingRowIndex]);
+
+  useEffect(() => {
+    if (phase === GamePhase.RESOLVING && resolvingIndex >= 0) {
+      audioService.playCardSlide();
+    }
+  }, [resolvingIndex, phase]);
+
+  useEffect(() => {
+    if (phase === GamePhase.ROUND_VOTING) {
+      audioService.playFanfare();
+    }
+  }, [phase]);
+
+  const toggleMute = () => {
+    const muted = audioService.toggleMute();
+    setIsMuted(muted);
+  };
 
   // --- Networking Setup (Centralized) ---
 
@@ -77,6 +103,7 @@ export default function App() {
           case 'WELCOME':
             setMyPlayerId(msg.payload.playerId);
             syncState(msg.payload.gameState);
+            audioService.playClick();
             break;
           case 'STATE_UPDATE':
             syncState(msg.payload);
@@ -94,6 +121,7 @@ export default function App() {
               return [...prev, msg.payload];
             });
             setUserMessage(`${msg.payload.name} joined!`);
+            audioService.playClick();
             // Send welcome back to confirm connection
             peerService.broadcast({ 
                 type: 'WELCOME', 
@@ -114,15 +142,7 @@ export default function App() {
             break;
 
           case 'ACTION_TOGGLE_READY':
-             // We need to find which player sent this. 
-             // In a real backend we verify token, here we rely on the Host knowing ID mapping or passing it.
-             // P2P limitation: identifying sender relies on connection metadata or payload.
-             // For simplicity, Client sends specific message, Host updates that client.
-             // To do this properly without passing ID in payload (insecure but fine here), we iterate players.
-             // Ideally msg.payload should have ID, but our type def is simplified.
-             // Let's assume we handle this via finding who is not ready? No, we need ID.
-             // Hack: Clients in this App are mapped. 
-             // Fix: Let's look at handleToggleReady implementation below.
+             // Logic handled in handleToggleReady via implicit broadcast of state
              break;
             
           case 'ACTION_SELECT_ROW':
@@ -185,6 +205,7 @@ export default function App() {
 
   const initHost = async () => {
     try {
+      audioService.playClick();
       const id = await peerService.init();
       setMyPeerId(id);
       setNetworkMode(NetworkMode.HOST);
@@ -200,6 +221,7 @@ export default function App() {
     if (!playerNameInput) return alert("Enter Name");
 
     try {
+      audioService.playClick();
       await peerService.init(); 
       setNetworkMode(NetworkMode.CLIENT);
       setUserMessage("Connecting to host...");
@@ -229,6 +251,7 @@ export default function App() {
 
   const startHostGame = () => {
     if (networkMode !== NetworkMode.HOST) return;
+    audioService.playFanfare();
 
     const deck = shuffleDeck(generateDeck());
     const newPlayers: Player[] = [];
@@ -307,8 +330,6 @@ export default function App() {
     }
 
     // 3. Check Everyone
-    const allSelected = players.every(p => p.selectedCard !== null);
-    
     // We rely on the 'isReady' flag for Humans, but Bots just need to have selected.
     const botsReady = players.filter(p => p.type === PlayerType.BOT).every(p => p.selectedCard !== null);
 
@@ -345,6 +366,7 @@ export default function App() {
   };
 
   const handlePlayerAction = (card: CardData, playerId: string) => {
+    audioService.playSelect();
     setPlayers(prev => prev.map(p => 
       // When selecting a new card, reset ready status to false to allow confirmation
       p.id === playerId ? { ...p, selectedCard: card, isReady: false } : p
@@ -352,6 +374,7 @@ export default function App() {
   };
 
   const handleToggleReady = (playerId: string, isReady: boolean) => {
+    audioService.playClick();
     setPlayers(prev => prev.map(p => 
       p.id === playerId ? { ...p, isReady } : p
     ));
@@ -360,6 +383,7 @@ export default function App() {
   // --- Phase Logic (Host Only) ---
 
   const startNewRound = (playersSnapshot?: Player[]) => {
+    audioService.playCardSlide();
     const deck = shuffleDeck(generateDeck());
     const sourcePlayers = playersSnapshot || players;
 
@@ -406,6 +430,7 @@ export default function App() {
     setPhase(GamePhase.REVEAL);
     setUserMessage("Revealing cards...");
 
+    // Wait a moment in REVEAL to show the staging area before starting resolution
     setTimeout(() => {
       setPhase(GamePhase.RESOLVING);
       setResolvingIndex(0);
@@ -448,6 +473,7 @@ export default function App() {
   };
 
   const placeCardInRow = (turn: { playerId: string, card: CardData }, rowIndex: number) => {
+    // Delay to allow animation (Staging -> Row) to play
     setTimeout(() => {
       setRows(prev => {
         const newRows = [...prev];
@@ -473,6 +499,7 @@ export default function App() {
 
     if (player.type === PlayerType.HUMAN) {
       setPhase(GamePhase.CHOOSING_ROW);
+      audioService.playAlert();
       setUserMessage(`${player.name}, card too low! Choose a row to take.`);
     } else {
       const chosenRowIdx = await getBotRowChoice(player, rows);
@@ -545,6 +572,7 @@ export default function App() {
   };
 
   const handleVote = (playerId: string, vote: boolean) => {
+    audioService.playClick();
     if (networkMode === NetworkMode.CLIENT) {
        peerService.sendToHost({ type: 'ACTION_VOTE_NEXT_ROUND', payload: { vote } });
     }
@@ -777,6 +805,13 @@ export default function App() {
 
         <div className="flex items-center gap-2 ml-4">
           <button 
+            onClick={toggleMute}
+            className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-white transition-colors"
+          >
+            {isMuted ? <VolumeX size={20} className="text-slate-400" /> : <Volume2 size={20} />}
+          </button>
+
+          <button 
             onClick={() => setIsScoreBoardOpen(true)}
             className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-white transition-colors relative"
           >
@@ -804,23 +839,12 @@ export default function App() {
              rows={rows} 
              phase={phase} 
              onSelectRow={onRowClick} 
-             takingRowIndex={takingRowIndex} 
+             takingRowIndex={takingRowIndex}
+             turnCards={turnCards}
+             resolvingIndex={resolvingIndex}
+             players={players}
            />
         </div>
-
-        {/* Reveal Area (Center) */}
-        {phase === GamePhase.REVEAL && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm z-40 animate-in fade-in">
-             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 p-8">
-               {turnCards.map((turn, idx) => (
-                 <div key={idx} className="flex flex-col items-center gap-2 animate-in zoom-in duration-300" style={{animationDelay: `${idx * 100}ms`}}>
-                   <div className="text-white font-bold shadow-black drop-shadow-md">{players.find(p => p.id === turn.playerId)?.name}</div>
-                   <Card id={turn.card.id} bullHeads={turn.card.bullHeads} />
-                 </div>
-               ))}
-             </div>
-          </div>
-        )}
         
         {/* Voting Overlay */}
         {phase === GamePhase.ROUND_VOTING && (
@@ -892,7 +916,7 @@ export default function App() {
             </div>
          )}
 
-         <div className="max-w-5xl mx-auto overflow-x-auto no-scrollbar">
+         <div className="max-w-5xl mx-auto overflow-x-auto no-scrollbar pt-8">
            <div className="flex justify-center gap-2 sm:gap-4 min-w-max px-4">
              {myPlayer?.hand.map((card) => (
                <div 
@@ -922,9 +946,9 @@ export default function App() {
       {/* Scoreboard Modal */}
       <ScoreBoard 
         players={players} 
-        currentRound={currentRound} 
-        isOpen={isScoreBoardOpen || phase === GamePhase.GAME_END} 
-        onClose={() => setIsScoreBoardOpen(false)} 
+        currentRound={currentRound}
+        isOpen={isScoreBoardOpen}
+        onClose={() => setIsScoreBoardOpen(false)}
       />
     </div>
   );
