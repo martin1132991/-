@@ -36,6 +36,7 @@ export enum GamePhase {
   REVEAL = 'REVEAL', // Showing selected cards
   RESOLVING = 'RESOLVING', // Placing cards one by one
   CHOOSING_ROW = 'CHOOSING_ROW', // User needs to pick a row to take
+  ROUND_VOTING = 'ROUND_VOTING', // Voting to continue
   ROUND_END = 'ROUND_END',
   GAME_END = 'GAME_END'
 }
@@ -62,6 +63,7 @@ export interface GameState {
   turnCards: {playerId: string, card: CardData}[];
   resolvingIndex: number;
   userMessage: string;
+  votes: Record<string, boolean>;
 }
 
 export type NetworkMessage = 
@@ -69,5 +71,6 @@ export type NetworkMessage =
   | { type: 'STATE_UPDATE'; payload: GameState }
   | { type: 'ACTION_SELECT_CARD'; payload: { card: CardData } }
   | { type: 'ACTION_SELECT_ROW'; payload: { rowIndex: number } }
+  | { type: 'ACTION_VOTE_NEXT_ROUND'; payload: { vote: boolean } }
   | { type: 'PLAYER_JOINED'; payload: { id: string; name: string } }
   | { type: 'START_GAME'; payload: { config: GameConfig } };
