@@ -2,7 +2,7 @@
 import React from 'react';
 import { CardData, GameRow, GamePhase, Player } from '../types';
 import Card from './Card';
-import { MousePointerClick, Skull, ArrowDown, Loader, Clock, CheckCircle2 } from 'lucide-react';
+import { MousePointerClick, Skull, ArrowDown, Loader, CheckCircle2 } from 'lucide-react';
 
 interface GameBoardProps {
   rows: GameRow[];
@@ -62,11 +62,11 @@ const GameBoard: React.FC<GameBoardProps> = ({
   }
 
   return (
-    <div className="flex-1 flex flex-col justify-center max-w-5xl mx-auto w-full py-2 sm:py-4 relative">
+    <div className="flex-grow flex flex-col justify-center max-w-7xl mx-auto w-full py-2 sm:py-4 px-4 relative min-h-0">
       
       {/* STAGING AREA: Player Status / Cards */}
       {showStaging && (
-        <div className="mb-4 sm:mb-8 min-h-[140px] sm:min-h-[180px] flex justify-center items-center perspective-1000">
+        <div className="mb-4 sm:mb-6 min-h-[120px] sm:min-h-[160px] flex justify-center items-center perspective-1000 shrink-0">
           <div className="flex flex-wrap justify-center gap-2 sm:gap-4 w-full px-2">
             {/* CHOICE PHASE: Show all players status (Thinking/Ready) */}
             {phase === GamePhase.PLAYER_CHOICE ? (
@@ -76,7 +76,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
                  
                  return (
                    <div key={player.id} className="flex flex-col items-center relative animate-in fade-in">
-                     <div className="relative scale-90">
+                     <div className="relative scale-75 sm:scale-90 origin-bottom">
                         {isReady ? (
                           // Ready: Show Card (Face Up if me, Face Down if other)
                           <div className="relative">
@@ -98,7 +98,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
                           </div>
                         )}
                      </div>
-                     <span className={`mt-2 text-xs sm:text-sm font-bold px-2 py-1 rounded-full max-w-[100px] truncate
+                     <span className={`mt-1 text-xs font-bold px-2 py-0.5 rounded-full max-w-[80px] truncate
                        ${isReady ? 'bg-slate-700 text-emerald-400' : 'bg-slate-800 text-slate-500'}
                      `}>
                        {player.name}
@@ -114,20 +114,15 @@ const GameBoard: React.FC<GameBoardProps> = ({
                   const player = players ? players.find(p => p.id === turn.playerId) : null;
                   const isResolving = idx === resolvingIndex;
                   const isDone = idx < resolvingIndex;
-                  const isLocal = myPlayerId && turn.playerId === myPlayerId;
+                  // const isLocal = myPlayerId && turn.playerId === myPlayerId;
                   
                   // Hide processed cards from staging area (they moved to rows)
                   if (phase === GamePhase.RESOLVING && isDone) return null;
 
                   let transformStyle = {};
-                  if (phase === GamePhase.RESOLVING && isResolving && targetRowIndex !== -1) {
-                    const yOffset = 150 + (targetRowIndex * 100); 
-                    transformStyle = { 
-                      transform: `translateY(${yOffset}px) scale(0.5)`,
-                      opacity: 0,
-                      transition: 'all 0.8s ease-in-out'
-                    };
-                  }
+                  // Note: Logic to fly card to row is complex in React without a dedicated animation library.
+                  // We simulate it by hiding it here and showing it in the row (logic in processNextTurn).
+                  // But for visual flair, we fade it out or scale it.
 
                   return (
                      <div 
@@ -135,7 +130,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
                       className="flex flex-col items-center transition-all duration-500 relative animate-in fade-in"
                       style={transformStyle}
                      >
-                       <div className={`relative transition-transform duration-300 ${isResolving ? 'scale-110 z-20 ring-4 ring-yellow-400 rounded-lg' : 'scale-90'}`}>
+                       <div className={`relative transition-transform duration-300 ${isResolving ? 'scale-110 z-20 ring-4 ring-yellow-400 rounded-lg shadow-[0_0_20px_rgba(250,204,21,0.5)]' : 'scale-75 sm:scale-90 opacity-80'}`}>
                           <Card 
                             id={turn.card.id} 
                             bullHeads={turn.card.bullHeads} 
@@ -148,7 +143,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
                             </div>
                           )}
                        </div>
-                       <span className={`mt-2 text-xs sm:text-sm font-bold px-2 py-1 rounded-full max-w-[100px] truncate
+                       <span className={`mt-1 text-xs font-bold px-2 py-0.5 rounded-full max-w-[80px] truncate
                          ${isResolving ? 'bg-yellow-500 text-black' : 'bg-slate-700 text-slate-300'}
                        `}>
                          {player?.name || '???'}
@@ -161,8 +156,8 @@ const GameBoard: React.FC<GameBoardProps> = ({
         </div>
       )}
 
-      {/* ROWS GRID */}
-      <div className="grid grid-cols-1 gap-3 sm:gap-4">
+      {/* ROWS GRID - OPTIMIZED FOR DESKTOP (2 COLUMNS) */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4 md:gap-x-6 md:gap-y-4 w-full auto-rows-fr">
         {rows.map((row, idx) => {
           if (!row || !row.cards) return null;
 
@@ -183,7 +178,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
                   ? 'bg-red-900/80 border-4 border-red-500 scale-[1.02] shadow-[0_0_30px_rgba(239,68,68,0.6)] z-10' 
                   : canInteract 
                     ? 'bg-yellow-900/40 hover:bg-yellow-600/40 cursor-pointer ring-4 ring-yellow-400 shadow-[0_0_15px_rgba(250,204,21,0.5)] scale-[1.01]' 
-                    : 'bg-emerald-900/50'
+                    : 'bg-emerald-900/50 border border-slate-700/50'
                 }
               `}
               onClick={() => {
@@ -193,7 +188,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
               }}
             >
               <div className={`
-                absolute -left-2 sm:-left-4 w-6 h-6 sm:w-8 sm:h-8 flex items-center justify-center rounded-full font-bold text-xs sm:text-sm shadow-lg z-20
+                absolute -left-2 sm:-left-3 w-6 h-6 sm:w-8 sm:h-8 flex items-center justify-center rounded-full font-bold text-xs sm:text-sm shadow-lg z-20
                 ${isBeingTaken ? 'bg-red-500 text-white animate-ping' : 'bg-slate-700 text-slate-200 border-2 border-slate-600'}
               `}>
                 {idx + 1}
@@ -216,9 +211,9 @@ const GameBoard: React.FC<GameBoardProps> = ({
 
               {isBeingTaken && (
                  <div className="absolute inset-0 flex items-center justify-center z-30 bg-black/20 backdrop-blur-[2px] rounded-lg">
-                    <div className="bg-red-600 text-white font-black text-lg sm:text-2xl px-6 py-2 rounded-full shadow-2xl animate-bounce flex items-center gap-2 border-4 border-red-400">
-                      <Skull size={28} /> 
-                      {takerName} TAKING ROW {idx + 1}
+                    <div className="bg-red-600 text-white font-black text-lg sm:text-xl px-4 py-2 rounded-full shadow-2xl animate-bounce flex items-center gap-2 border-4 border-red-400">
+                      <Skull size={24} /> 
+                      {takerName} TAKING!
                     </div>
                  </div>
               )}
@@ -230,7 +225,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
               )}
 
               {!isBeingTaken && (
-                 <div className="absolute right-2 bottom-1 text-[10px] text-slate-400 font-mono">
+                 <div className="absolute right-2 bottom-1 text-[10px] text-slate-400 font-mono bg-slate-900/50 px-1 rounded">
                     {row.cards.reduce((sum, c) => sum + (c ? c.bullHeads : 0), 0)} Heads
                  </div>
               )}

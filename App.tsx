@@ -11,12 +11,13 @@ import {
 import { getBotDecision, getBotRowChoice } from './services/aiService';
 import GameBoard from './components/GameBoard';
 import ScoreBoard from './components/ScoreBoard';
+import GameRules from './components/GameRules';
 import Card from './components/Card';
 import { audioService } from './services/audioService';
 import { firebaseService } from './services/firebaseService';
 import { 
   Copy, Play, Users, Volume2, VolumeX, Zap, LogOut, Loader, PlayCircle,
-  MessageSquare, Send, Smile, X, Check, RefreshCcw, Clock, AlarmClock, Trophy, User, ThumbsUp, ThumbsDown
+  MessageSquare, Send, Smile, X, Check, RefreshCcw, Clock, AlarmClock, Trophy, User, ThumbsUp, ThumbsDown, BookOpen
 } from 'lucide-react';
 
 const HAND_SIZE = 10;
@@ -47,6 +48,7 @@ function App() {
 
   // UI State
   const [isScoreBoardOpen, setIsScoreBoardOpen] = useState(false);
+  const [isRulesOpen, setIsRulesOpen] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
@@ -422,6 +424,9 @@ function App() {
     currentTurns: {playerId: string, card: CardData}[] = turnCards,
     currentIndex: number = resolvingIndex
   ) => {
+    // Safety Guard: Prevent double execution if already taking a row
+    if (takingRowIndex !== -1) return;
+
     const turn = currentTurns[currentIndex];
     if (!turn) return;
 
@@ -442,7 +447,8 @@ function App() {
     setPlayers(updatedPlayers);
     setRows(updatedRows);
     setPhase(GamePhase.RESOLVING);
-    setTakingRowIndex(-1);
+    // setTakingRowIndex(-1) is handled in animateTakingRow promise resolution, but let's ensure:
+    // Actually, animateTakingRow resets it to -1 after animation.
     setActivePlayerId(null);
 
     setTimeout(() => processNextTurn(currentIndex + 1, currentTurns, updatedRows, updatedPlayers), 1000);
@@ -451,6 +457,12 @@ function App() {
   const onUserSelectRow = (rowIndex: number) => {
     if (phase !== GamePhase.CHOOSING_ROW) return;
     if (activePlayerId !== myPlayerId) return;
+    
+    // Safety Check: Ensure resolvingIndex is valid to avoid silent failure
+    if (resolvingIndex < 0 || resolvingIndex >= turnCards.length) {
+        console.error("Invalid resolvingIndex during manual selection:", resolvingIndex);
+        return;
+    }
 
     if (networkMode === NetworkMode.LOCAL) {
       handleRowSelect(rowIndex);
@@ -597,6 +609,8 @@ function App() {
                         bestRowIndex = idx;
                     }
                 });
+                
+                console.log("Auto-selecting Row:", bestRowIndex, "due to timeout");
                 
                 handleRowSelect(
                     bestRowIndex, 
@@ -762,7 +776,17 @@ function App() {
 
   if (phase === GamePhase.LOBBY) {
     return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4 relative">
+         
+         {/* RULES BUTTON (Lobby) */}
+         <button 
+            onClick={() => setIsRulesOpen(true)}
+            className="absolute top-4 right-4 flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white px-4 py-2 rounded-full transition-all border border-slate-700 z-10"
+         >
+            <BookOpen size={18} /> 
+            <span className="hidden sm:inline">遊戲玩法</span>
+         </button>
+         
          <div className="flex flex-col md:flex-row gap-6 w-full max-w-4xl">
              {/* Left: Local Game */}
              <div className="flex-1 bg-slate-800 p-8 rounded-2xl shadow-2xl border border-slate-700">
@@ -965,6 +989,8 @@ function App() {
                 onChange={(e) => setMyName(e.target.value)}
              />
          </div>
+         
+         <GameRules isOpen={isRulesOpen} onClose={() => setIsRulesOpen(false)} />
       </div>
     );
   }
@@ -974,7 +1000,7 @@ function App() {
   const myPlayer = getMyPlayer();
   
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-yellow-500/30 flex flex-col overflow-hidden">
+    <div className="h-screen bg-slate-950 text-slate-200 font-sans selection:bg-yellow-500/30 flex flex-col overflow-hidden">
        
        {/* Chat Overlay (RIGHT SIDE) */}
        <div className="fixed top-32 right-4 z-40 flex flex-col gap-2 w-64 pointer-events-none items-end">
@@ -992,7 +1018,7 @@ function App() {
        </div>
 
        {/* Header */}
-       <header className="h-14 sm:h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-4 z-20 relative">
+       <header className="h-14 sm:h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-4 z-20 shrink-0 relative">
           <div className="flex items-center gap-2 sm:gap-4">
              <div className="text-yellow-500 font-black text-lg sm:text-xl tracking-tighter block">牛頭王 - 遠離賭博</div>
              <div className="bg-slate-800 px-3 py-1 rounded-full text-xs font-mono text-slate-400 border border-slate-700 flex items-center gap-2">
@@ -1004,6 +1030,9 @@ function App() {
           </div>
           
           <div className="flex items-center gap-2">
+             <button onClick={() => setIsRulesOpen(true)} className="p-2 hover:bg-slate-800 rounded-full text-slate-400 hover:text-white transition">
+                <BookOpen size={20} />
+             </button>
              <button onClick={() => setIsScoreBoardOpen(true)} className="p-2 hover:bg-slate-800 rounded-full text-slate-400 hover:text-white transition">
                 <Trophy size={20} />
              </button>
@@ -1042,22 +1071,24 @@ function App() {
        </header>
 
        {/* Main Board Area */}
-       <main className="flex-1 relative overflow-hidden flex flex-col">
-          <GameBoard 
-             rows={rows}
-             phase={phase}
-             takingRowIndex={takingRowIndex}
-             turnCards={turnCards}
-             resolvingIndex={resolvingIndex}
-             players={players}
-             onSelectRow={onUserSelectRow}
-             isMyTurnToChooseRow={activePlayerId === myPlayerId && phase === GamePhase.CHOOSING_ROW}
-             choosingPlayerName={players.find(p => p.id === activePlayerId)?.name}
-             myPlayerId={myPlayerId}
-          />
+       <main className="flex-1 relative flex flex-col min-h-0">
+          <div className="flex-1 overflow-y-auto no-scrollbar w-full flex flex-col">
+              <GameBoard 
+                 rows={rows}
+                 phase={phase}
+                 takingRowIndex={takingRowIndex}
+                 turnCards={turnCards}
+                 resolvingIndex={resolvingIndex}
+                 players={players}
+                 onSelectRow={onUserSelectRow}
+                 isMyTurnToChooseRow={activePlayerId === myPlayerId && phase === GamePhase.CHOOSING_ROW}
+                 choosingPlayerName={players.find(p => p.id === activePlayerId)?.name}
+                 myPlayerId={myPlayerId}
+              />
+          </div>
 
-          {/* Hand Area */}
-          <div className="relative z-30 bg-slate-900/80 backdrop-blur-md border-t border-slate-800 pt-10 pb-4 sm:pb-6 transition-all duration-300">
+          {/* Hand Area - Fixed at bottom of flex column */}
+          <div className="relative z-30 bg-slate-900/80 backdrop-blur-md border-t border-slate-800 pt-10 pb-4 sm:pb-6 transition-all duration-300 shrink-0">
              {/* CONFIRM BUTTON OVERLAY */}
              {myPlayer?.selectedCard && !myPlayer?.isReady && (
                  <div className="absolute top-[-3.5rem] left-1/2 -translate-x-1/2 flex gap-2 animate-in zoom-in-90 duration-200">
@@ -1176,6 +1207,8 @@ function App() {
          players={players} 
          currentRound={currentRound}
        />
+
+       <GameRules isOpen={isRulesOpen} onClose={() => setIsRulesOpen(false)} />
 
        {/* Voting Overlay */}
        {phase === GamePhase.ROUND_VOTING && (
