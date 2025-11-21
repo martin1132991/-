@@ -1,3 +1,4 @@
+
 import { CardData, GameRow, Player } from '../types';
 
 export const TOTAL_CARDS = 104;
@@ -64,22 +65,18 @@ export const findTargetRowIndex = (card: CardData, rows: GameRow[]): number => {
 /**
  * Calculates the total bull heads in a list of cards.
  */
-export const sumBullHeads = (cards: CardData[]): number => {
+export const sumBullHeads = (cards: CardData[] | undefined): number => {
+  if (!cards || !Array.isArray(cards)) return 0;
   return cards.reduce((sum, card) => sum + card.bullHeads, 0);
 };
 
 /**
  * Calculates score for a round based on the updated formula:
  * Score = (Total Game Bull Heads) - (My Bull Heads * Total Player Count)
- * 
- * Note: This is a Zero-Sum system.
- * - If you have 0 heads, you get positive points (TotalHeads).
- * - If you have many heads, you get negative points (TotalHeads - LargeNumber).
- * - Therefore, Highest Score Wins.
  */
 export const calculateRoundScore = (player: Player, allPlayers: Player[]): number => {
-  const myHeads = sumBullHeads(player.collectedCards);
-  const totalHeads = allPlayers.reduce((sum, p) => sum + sumBullHeads(p.collectedCards), 0);
+  const myHeads = sumBullHeads(player.collectedCards || []);
+  const totalHeads = allPlayers.reduce((sum, p) => sum + sumBullHeads(p.collectedCards || []), 0);
   const playerCount = allPlayers.length;
 
   return totalHeads - (myHeads * playerCount);

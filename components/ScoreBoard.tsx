@@ -1,3 +1,4 @@
+
 import React, { useState } from 'react';
 import { Player, PlayerType } from '../types';
 import { sumBullHeads, calculateRoundScore } from '../services/gameLogic';
@@ -14,26 +15,29 @@ const ScoreBoard: React.FC<ScoreBoardProps> = ({ players, currentRound, isOpen, 
   const [viewMode, setViewMode] = useState<'total' | number>('total');
 
   if (!isOpen) return null;
-
-  // Determine if the current round is already finalized in history or is live.
-  // App.tsx updates history before incrementing currentRound, so if they match, it's finalized/transitioning.
-  const historyLength = players[0].scoreHistory.length;
+  
+  // CRITICAL FIX: Safety check to prevent crash if data is syncing or empty
+  if (!players || players.length === 0 || !players[0]) {
+    return null; 
+  }
+  
+  // Check if scoreHistory exists to avoid crash (Firebase might return undefined for empty arrays)
+  const firstPlayerHistory = players[0].scoreHistory || [];
+  const historyLength = firstPlayerHistory.length;
   const isRoundFinalized = historyLength === currentRound;
 
   // Calculate data for each player based on the current state
   const tableData = players.map(player => {
-    const currentHeads = sumBullHeads(player.collectedCards);
+    const collected = player.collectedCards || [];
+    const currentHeads = sumBullHeads(collected);
     
     // If round is NOT finalized, we calculate live score.
-    // If it IS finalized, the live cards are technically cleared or about to be cleared,
-    // but the score is already recorded in history.
     const liveRoundScore = calculateRoundScore(player, players);
     
-    const historyTotalScore = player.totalScore; // This includes history rounds
-    const historyTotalHeads = player.scoreHistory.reduce((acc, h) => acc + h.heads, 0);
+    const historyTotalScore = player.totalScore || 0; 
+    const scoreHistory = player.scoreHistory || [];
+    const historyTotalHeads = scoreHistory.reduce((acc, h) => acc + (h?.heads || 0), 0);
 
-    // If round is in progress (not finalized), Total = History Total + Live Projection.
-    // If round is finalized, Total = History Total (which already includes the round).
     const projectedTotalScore = isRoundFinalized 
       ? historyTotalScore 
       : historyTotalScore + liveRoundScore;
@@ -68,7 +72,6 @@ const ScoreBoard: React.FC<ScoreBoardProps> = ({ players, currentRound, isOpen, 
     // Viewing a specific round
     const roundIndex = viewMode - 1;
     
-    // If viewing the current round which is NOT finalized yet -> Show Live
     if (viewMode === currentRound && !isRoundFinalized) {
        return {
          score: p.live.score,
@@ -77,7 +80,6 @@ const ScoreBoard: React.FC<ScoreBoardProps> = ({ players, currentRound, isOpen, 
        };
     }
 
-    // Otherwise get from history
     const history = p.scoreHistory[roundIndex];
     return {
       score: history?.score ?? 0,
@@ -86,12 +88,11 @@ const ScoreBoard: React.FC<ScoreBoardProps> = ({ players, currentRound, isOpen, 
     };
   };
 
-  // Sort players by Total Projected Score ALWAYS, regardless of viewMode
+  // Sort players by Total Projected Score
   const sortedPlayers = [...tableData].sort((a, b) => {
-    return b.totals.score - a.totals.score; // Highest score wins
+    return b.totals.score - a.totals.score;
   });
 
-  // Generate tabs for rounds
   const rounds = Array.from({ length: currentRound }, (_, i) => i + 1);
 
   return (

@@ -1,689 +1,461 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
-  Player, 
-  CardData, 
-  GameRow, 
-  GamePhase, 
-  GameConfig, 
-  PlayerType, 
-  NetworkMode,
-  GameState,
-  NetworkMessage,
-  ChatMessage
+  Player, CardData, GameRow, GamePhase, NetworkMode, 
+  GameState, NetworkMessage, PlayerType, ChatMessage, RoundResult
 } from './types';
 import { 
-  generateDeck, 
-  shuffleDeck, 
-  findTargetRowIndex, 
-  calculateRoundScore,
-  TOTAL_CARDS 
+  generateDeck, shuffleDeck, findTargetRowIndex, 
+  calculateRoundScore, sumBullHeads 
 } from './services/gameLogic';
 import { getBotDecision, getBotRowChoice } from './services/aiService';
-import { firebaseService } from './services/firebaseService';
-import { audioService } from './services/audioService';
 import GameBoard from './components/GameBoard';
-import Card from './components/Card';
 import ScoreBoard from './components/ScoreBoard';
-import { Users, Bot, Play, RotateCcw, Volume2, VolumeX, Loader2, CheckCircle2, XCircle, AlertTriangle, MessageSquare, Send, Clock } from 'lucide-react';
+import Card from './components/Card';
+import { audioService } from './services/audioService';
+import { firebaseService } from './services/firebaseService';
+import { 
+  Copy, Play, Users, Volume2, VolumeX, Zap, LogOut, Loader, PlayCircle,
+  MessageSquare, Send, Smile, X, Check, RefreshCcw, Clock, AlarmClock, Trophy
+} from 'lucide-react';
 
-const DEFAULT_CONFIG: GameConfig = {
-  maxRounds: 10, // Not strictly used with voting logic
-  totalPlayers: 4
-};
+const MAX_ROUNDS = 10;
+const HAND_SIZE = 10;
 
-const PRESET_REACTIONS = ["👍", "👎", "😂", "😭", "😡", "🐮", "⚡", "💀", "🎉", "🤔", "GG", "Nice!", "Ouch", "Speed!", "OMG"];
+const PRESET_REACTIONS = [
+  "😂", "👍", "👎", "😡", "😱", "🐮", "⚡", "🤔",
+  "GG", "Nice!", "Ouch", "Speed!", "Wait...", "Lucky"
+];
 
-const App: React.FC = () => {
-  // --- Game State ---
-  const [config, setConfig] = useState<GameConfig>(DEFAULT_CONFIG);
-  const [numHumans, setNumHumans] = useState<number>(1);
-  
+function App() {
+  // --- State ---
   const [players, setPlayers] = useState<Player[]>([]);
   const [rows, setRows] = useState<GameRow[]>([]);
   const [phase, setPhase] = useState<GamePhase>(GamePhase.LOBBY);
-  const [currentRound, setCurrentRound] = useState<number>(1);
-  const [userMessage, setUserMessage] = useState<string>("");
-  
-  // Turn Management
+  const [currentRound, setCurrentRound] = useState(1);
+  const [activePlayerId, setActivePlayerId] = useState<string | null>(null);
   const [turnCards, setTurnCards] = useState<{playerId: string, card: CardData}[]>([]);
-  const [resolvingIndex, setResolvingIndex] = useState<number>(-1);
-  const lastProcessedIndexRef = useRef<number>(-1); // Prevent double-processing in useEffect
-  const [turnDeadline, setTurnDeadline] = useState<number>(0); // Timestamp for turn end
+  const [resolvingIndex, setResolvingIndex] = useState(-1);
+  const [userMessage, setUserMessage] = useState("");
+  const [votes, setVotes] = useState<Record<string, boolean>>({});
+  const [takingRowIndex, setTakingRowIndex] = useState(-1);
+  const [turnDeadline, setTurnDeadline] = useState(0);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [timeLeft, setTimeLeft] = useState(0);
+  
+  // Lobby Config State
+  const [hostConfig, setHostConfig] = useState({ totalPlayers: 4, localHumans: 1, turnDuration: 20 });
 
   // UI State
-  const [isScoreBoardOpen, setIsScoreBoardOpen] = useState<boolean>(false);
-  const [takingRowIndex, setTakingRowIndex] = useState<number>(-1); // -1 means no animation
-  const [votes, setVotes] = useState<Record<string, boolean>>({}); // For voting next round
-  const [isChatOpen, setIsChatOpen] = useState<boolean>(false);
-  const [chatInput, setChatInput] = useState<string>("");
-  const [timeLeft, setTimeLeft] = useState<number>(0); // Local visual countdown
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]); // Global chat state
+  const [isScoreBoardOpen, setIsScoreBoardOpen] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatInput, setChatInput] = useState("");
+  
+  // Refs for Logic Optimization
+  const thinkingBotsRef = useRef<Set<string>>(new Set());
 
-  // Audio State
-  const [isMuted, setIsMuted] = useState<boolean>(false);
-
-  // --- Networking State ---
-  const [networkMode, setNetworkMode] = useState<NetworkMode>(NetworkMode.LOCAL);
-  // Persist Player ID
   const [myPlayerId, setMyPlayerId] = useState<string>(() => {
-    const saved = localStorage.getItem('cowking_player_id');
-    return saved || Math.random().toString(36).substr(2, 9);
+      // Persist ID to handle refreshes better
+      const saved = localStorage.getItem('cow_king_pid');
+      return saved || "";
   });
-  const [roomId, setRoomId] = useState<string>('');
-  const [joinRoomIdInput, setJoinRoomIdInput] = useState<string>('');
-  const [hostName, setHostName] = useState<string>('Host');
-  const [clientName, setClientName] = useState<string>('Player');
-  const [isJoining, setIsJoining] = useState<boolean>(false);
-  const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [networkMode, setNetworkMode] = useState<NetworkMode>(NetworkMode.LOCAL);
+  const [roomId, setRoomId] = useState<string>("");
+  const [joinRoomId, setJoinRoomId] = useState("");
+  const [myName, setMyName] = useState("Player 1");
 
-  // Reaction Cleanup Refs (Deprecated by chatMessages, but kept for safety)
-  const reactionTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  // --- Helpers ---
+  
+  const getMyPlayer = () => players.find(p => p.id === myPlayerId);
 
-  // Save ID on change
+  // Persist ID
   useEffect(() => {
-    localStorage.setItem('cowking_player_id', myPlayerId);
+      if (myPlayerId) localStorage.setItem('cow_king_pid', myPlayerId);
   }, [myPlayerId]);
 
-  // Toggle Mute
-  const toggleMute = () => {
-    const muted = audioService.toggleMute();
-    setIsMuted(muted);
+  // --- Game Logic ---
+
+  const initGame = () => {
+    setPhase(GamePhase.LOBBY);
+    setPlayers([]);
+    setNetworkMode(NetworkMode.LOCAL);
+    thinkingBotsRef.current.clear();
   };
 
-  // --- Networking Logic ---
-
-  const initHost = async () => {
-    try {
-      audioService.playClick();
-      const id = await firebaseService.createRoom();
-      setRoomId(id);
-      setNetworkMode(NetworkMode.HOST);
-      setIsConnected(true);
-      
-      // Add Host as first player
-      const hostPlayer: Player = {
-        id: myPlayerId,
-        name: hostName || 'Host',
-        type: PlayerType.HUMAN,
-        hand: [],
-        collectedCards: [],
-        scoreHistory: [],
-        totalScore: 0,
-        selectedCard: null,
-        isConnected: true,
-        isReady: false
-      };
-      setPlayers([hostPlayer]);
-
-      // Subscribe to actions
-      firebaseService.subscribeToActions(id, handleNetworkAction);
-    } catch (err) {
-      alert("Failed to create room. Check console.");
-      console.error(err);
-    }
-  };
-
-  const joinGame = async () => {
-    if (!joinRoomIdInput) return;
-    audioService.playClick();
-    setIsJoining(true);
-
-    try {
-      const exists = await firebaseService.joinRoom(joinRoomIdInput);
-      if (!exists) {
-        throw new Error("Room not found");
-      }
-
-      setRoomId(joinRoomIdInput);
-      setNetworkMode(NetworkMode.CLIENT);
-      setIsConnected(true);
-
-      // Subscribe to game state
-      firebaseService.subscribeToGameState(joinRoomIdInput, (state) => {
-        if (state) {
-          setPlayers(state.players || []);
-          setRows(state.rows || []);
-          setPhase(state.phase);
-          setCurrentRound(state.currentRound);
-          setTurnCards(state.turnCards || []);
-          setResolvingIndex(state.resolvingIndex);
-          setUserMessage(state.userMessage || "");
-          setVotes(state.votes || {});
-          setTakingRowIndex(state.takingRowIndex ?? -1); // Sync animation state
-          setTurnDeadline(state.turnDeadline || 0);
-          setChatMessages(state.chatMessages || []); // Sync chat
-        }
-      });
-
-      // Announce join
-      firebaseService.sendAction(joinRoomIdInput, {
-        type: 'PLAYER_JOINED',
-        payload: { id: myPlayerId, name: clientName || 'Player' }
-      });
-
-    } catch (err: any) {
-      alert(err.message || "Failed to join.");
-      setIsJoining(false);
-    }
-  };
-
-  // Handle incoming actions (Host only)
-  const handleNetworkAction = (msg: NetworkMessage) => {
-    switch (msg.type) {
-      case 'PLAYER_JOINED':
-        setPlayers(prev => {
-          if (prev.find(p => p.id === msg.payload.id)) return prev;
-          const newPlayer: Player = {
-            id: msg.payload.id,
-            name: msg.payload.name,
-            type: PlayerType.HUMAN,
-            hand: [],
-            collectedCards: [],
-            scoreHistory: [],
-            totalScore: 0,
-            selectedCard: null,
-            isConnected: true,
-            isReady: false
-          };
-          return [...prev, newPlayer];
-        });
-        audioService.playSelect();
-        break;
-        
-      case 'ACTION_SELECT_CARD':
-        handleCardSelection(msg.payload.playerId, msg.payload.card);
-        break;
-
-      case 'ACTION_SELECT_ROW':
-        handleHumanRowSelect(msg.payload.rowIndex, msg.payload.playerId);
-        break;
-      
-      case 'ACTION_TOGGLE_READY':
-        handleToggleReady(msg.payload.playerId, msg.payload.isReady);
-        break;
-        
-      case 'ACTION_VOTE_NEXT_ROUND':
-        handleVote(msg.payload.playerId, msg.payload.vote);
-        break;
-
-      case 'ACTION_SEND_REACTION':
-        handleReceiveReaction(msg.payload.playerId, msg.payload.content, msg.payload.type);
-        break;
-    }
-  };
-
-  // Broadcast state (Host only)
+  // Run once on mount
   useEffect(() => {
-    if (networkMode === NetworkMode.HOST && roomId) {
-      const state: GameState = {
-        players,
-        rows,
-        phase,
-        currentRound,
-        activePlayerId: null,
-        turnCards,
-        resolvingIndex,
-        userMessage,
-        votes,
-        takingRowIndex,
-        turnDeadline,
-        chatMessages
-      };
-      firebaseService.updateGameState(roomId, state);
-    }
-  }, [players, rows, phase, currentRound, turnCards, resolvingIndex, userMessage, votes, takingRowIndex, turnDeadline, chatMessages, networkMode, roomId]);
+    initGame();
+  }, []);
 
-
-  // --- Game Loop Logic (Host) ---
-
-  const startGame = () => {
-    audioService.playClick();
+  // --- UI Countdown Timer (Separate from Game Logic) ---
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval>;
     
-    // If local mode, fill with bots
-    if (networkMode === NetworkMode.LOCAL) {
-      const total = config.totalPlayers;
-      const humans = numHumans;
-      const botsNeeded = total - humans;
+    // Timer runs in CHOICE phase AND CHOOSING_ROW phase
+    if (turnDeadline > 0 && (phase === GamePhase.PLAYER_CHOICE || phase === GamePhase.CHOOSING_ROW)) {
+      const updateTimer = () => {
+        const now = Date.now();
+        const remaining = Math.max(0, Math.ceil((turnDeadline - now) / 1000));
+        setTimeLeft(remaining);
+      };
       
-      const newPlayers: Player[] = [];
-      // Add humans
-      for (let i = 0; i < humans; i++) {
-        newPlayers.push({
-          // FIX: Assign myPlayerId to the first human so the UI recognizes "Me"
-          id: i === 0 ? myPlayerId : `human-${i}`,
-          name: i === 0 ? (hostName || 'Player 1') : `Player ${i+1}`,
-          type: PlayerType.HUMAN,
-          hand: [],
-          collectedCards: [],
-          scoreHistory: [],
-          totalScore: 0,
-          selectedCard: null,
-          isReady: false
-        });
-      }
-      // Add bots
-      for (let i = 0; i < botsNeeded; i++) {
-        newPlayers.push({
-          id: `bot-${i}`,
-          name: `Bot ${i+1}`,
-          type: PlayerType.BOT,
-          hand: [],
-          collectedCards: [],
-          scoreHistory: [],
-          totalScore: 0,
-          selectedCard: null,
-          isReady: false
-        });
-      }
-      setPlayers(newPlayers);
-      startNewRound(newPlayers);
+      // Update immediately
+      updateTimer();
+      
+      // Update frequently to catch the second change cleanly
+      interval = setInterval(updateTimer, 200);
     } else {
-      // Host mode: fill remaining slots with bots
-      const currentPlayers = [...players];
-      const botsNeeded = config.totalPlayers - currentPlayers.length;
-      for (let i = 0; i < botsNeeded; i++) {
-        currentPlayers.push({
-          id: `bot-${Date.now()}-${i}`,
-          name: `Bot ${i+1}`,
-          type: PlayerType.BOT,
-          hand: [],
-          collectedCards: [],
-          scoreHistory: [],
-          totalScore: 0,
-          selectedCard: null,
-          isConnected: true,
-          isReady: false
-        });
-      }
-      setPlayers(currentPlayers);
-      startNewRound(currentPlayers);
+      setTimeLeft(0);
     }
-  };
 
-  const startNewRound = (currentPlayers: Player[] = players) => {
-    setPhase(GamePhase.DEALING);
-    setTurnCards([]);
-    setResolvingIndex(-1);
-    lastProcessedIndexRef.current = -1;
-    setUserMessage(`Round ${currentRound} Starting!`);
-    setVotes({});
-    setChatMessages([]); // Clear chat on new round
-    audioService.playFanfare(); // Use fanfare as start sound too
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [turnDeadline, phase]);
 
-    // Generate Deck & Deal
+  const startRound = () => {
+    // Fill Bots logic
+    let currentPlayers = [...players];
+    const totalNeeded = hostConfig.totalPlayers;
+    
+    // If Local mode, ensure we have the right amount of humans
+    if (networkMode === NetworkMode.LOCAL) {
+        const humansNeeded = Math.min(hostConfig.localHumans, totalNeeded);
+        const botsNeeded = totalNeeded - humansNeeded;
+        currentPlayers = [];
+        
+        // Add Humans
+        for(let i=0; i<humansNeeded; i++) {
+            currentPlayers.push({
+                id: i===0 ? myPlayerId || 'p1' : `p${i+1}`,
+                name: i===0 ? myName : `Player ${i+1}`,
+                type: PlayerType.HUMAN,
+                hand: [], collectedCards: [], scoreHistory: [], totalScore: 0, selectedCard: null, isReady: false
+            });
+        }
+        // Add Bots
+        for(let i=0; i<botsNeeded; i++) {
+            currentPlayers.push({
+                id: `bot-${i}`,
+                name: `Bot ${i+1}`,
+                type: PlayerType.BOT,
+                hand: [], collectedCards: [], scoreHistory: [], totalScore: 0, selectedCard: null, isReady: false
+            });
+        }
+    } else if (networkMode === NetworkMode.HOST) {
+        // Host Online: Fill remaining slots with bots
+        const existingCount = currentPlayers.length;
+        const botsNeeded = Math.max(0, totalNeeded - existingCount);
+        for(let i=0; i<botsNeeded; i++) {
+            currentPlayers.push({
+                id: `bot-${Date.now()}-${i}`,
+                name: `Bot ${i+1}`,
+                type: PlayerType.BOT,
+                hand: [], collectedCards: [], scoreHistory: [], totalScore: 0, selectedCard: null, isReady: false
+            });
+        }
+    }
+
     const deck = shuffleDeck(generateDeck());
     
-    // Deal 10 cards to each player
-    const updatedPlayers = currentPlayers.map(p => ({
+    // Deal cards
+    const newPlayers = currentPlayers.map(p => ({
       ...p,
-      hand: deck.splice(0, 10).sort((a, b) => a.id - b.id),
-      collectedCards: [], // Reset collected for the round
+      hand: deck.splice(0, HAND_SIZE).sort((a, b) => a.id - b.id),
+      collectedCards: [], // Clear collected for new round
       selectedCard: null,
-      isReady: false, // Reset ready state
-      lastReaction: undefined // Clear reactions
+      isReady: false
     }));
 
-    // Deal 4 rows of 1 card each
+    // Setup Rows
     const newRows: GameRow[] = [];
     for (let i = 0; i < 4; i++) {
       newRows.push({ cards: [deck.shift()!] });
     }
 
-    setPlayers(updatedPlayers);
+    setPlayers(newPlayers);
     setRows(newRows);
-
-    setTimeout(() => {
-      setPhase(GamePhase.PLAYER_CHOICE);
-      setTurnDeadline(Date.now() + 20000); // 20s timer
-      triggerBotTurns(updatedPlayers, newRows);
-    }, 1000);
-  };
-
-  // --- Host Timer Logic ---
-  useEffect(() => {
-    if (networkMode === NetworkMode.CLIENT) return;
-    if (phase !== GamePhase.PLAYER_CHOICE) return;
-    if (turnDeadline === 0) return;
-
-    const interval = setInterval(() => {
-      if (Date.now() > turnDeadline) {
-        // Time is up! Force random selection for AFK players
-        setPlayers(prev => {
-          let changed = false;
-          const newPlayers = prev.map(p => {
-            if (p.selectedCard === null) {
-              changed = true;
-              const randomCard = p.hand[Math.floor(Math.random() * p.hand.length)];
-              return { ...p, selectedCard: randomCard, isReady: true };
-            }
-            return p;
-          });
-          
-          if (changed) {
-            audioService.playAlert();
-            setUserMessage("Time's up! Random cards selected.");
-          }
-          return changed ? newPlayers : prev;
-        });
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [phase, turnDeadline, networkMode]);
-
-  // --- Client Visual Timer ---
-  useEffect(() => {
-    if (phase !== GamePhase.PLAYER_CHOICE || turnDeadline === 0) {
-      setTimeLeft(0);
-      return;
-    }
+    setTurnCards([]);
+    setResolvingIndex(-1);
+    setPhase(GamePhase.PLAYER_CHOICE);
+    setIsScoreBoardOpen(false);
+    setVotes({});
+    setTurnDeadline(hostConfig.turnDuration > 0 ? Date.now() + (hostConfig.turnDuration * 1000) : 0); 
+    thinkingBotsRef.current.clear();
     
-    const updateTimer = () => {
-      const delta = Math.ceil((turnDeadline - Date.now()) / 1000);
-      setTimeLeft(Math.max(0, delta));
-    };
-
-    updateTimer(); // Immediate update
-    const interval = setInterval(updateTimer, 500); // Update frequently for smooth countdown
-    return () => clearInterval(interval);
-  }, [turnDeadline, phase]);
-
-
-  const triggerBotTurns = (currentPlayers: Player[], currentRows: GameRow[]) => {
-    currentPlayers.forEach(player => {
-      if (player.type === PlayerType.BOT) {
-        setTimeout(async () => {
-          // Use functional update to prevent stale state (Human might have picked in meantime)
-          const decision = await getBotDecision(player, currentRows, []);
-          
-          setPlayers(prevPlayers => prevPlayers.map(p => {
-             if (p.id === player.id) {
-               return { ...p, selectedCard: decision, isReady: true };
-             }
-             return p;
-          }));
-        }, 1000 + Math.random() * 10000); // Bot moves within 1-10s, well within 20s limit
-      }
-    });
-  };
-
-  // --- Interaction Handlers ---
-
-  const handleCardSelection = (playerId: string, card: CardData) => {
-    if (networkMode === NetworkMode.CLIENT && playerId === myPlayerId) {
-      firebaseService.sendAction(roomId, {
-        type: 'ACTION_SELECT_CARD',
-        payload: { card, playerId }
-      });
-      return;
-    }
-
-    // Host Logic (or Local)
-    audioService.playClick();
-    setPlayers(prev => prev.map(p => {
-      if (p.id === playerId) {
-        return { ...p, selectedCard: card, isReady: false }; // Default not ready, wait for confirm
-      }
-      return p;
-    }));
-  };
-
-  const handleToggleReady = (playerId: string, isReady: boolean) => {
-    if (networkMode === NetworkMode.CLIENT && playerId === myPlayerId) {
-      firebaseService.sendAction(roomId, {
-        type: 'ACTION_TOGGLE_READY',
-        payload: { isReady, playerId }
-      });
-      return;
-    }
-
-    // Host Logic
-    if (isReady) audioService.playSelect();
-    setPlayers(prev => prev.map(p => {
-      if (p.id === playerId) return { ...p, isReady };
-      return p;
-    }));
-  };
-
-  const handleSendReaction = (content: string, type: 'emoji' | 'text') => {
-    if (networkMode === NetworkMode.CLIENT) {
-      firebaseService.sendAction(roomId, {
-        type: 'ACTION_SEND_REACTION',
-        payload: { content, type, playerId: myPlayerId }
-      });
-    } else {
-      // Host logic for self
-      handleReceiveReaction(myPlayerId, content, type);
-    }
-    // Close chat after sending
-    setIsChatOpen(false);
-    setChatInput("");
-  };
-
-  const handleReceiveReaction = (playerId: string, content: string, type: 'emoji' | 'text') => {
-    const player = players.find(p => p.id === playerId);
-    if (!player) return;
-
-    const newMessage: ChatMessage = {
-      id: Math.random().toString(36).substr(2, 9),
-      playerId,
-      playerName: player.name,
-      content,
-      type,
-      timestamp: Date.now()
-    };
-
-    // Host updates the centralized chat list
-    setChatMessages(prev => [...prev, newMessage]);
-
-    if (type === 'emoji') audioService.playClick();
-
-    // Host schedules cleanup for this specific message
-    if (networkMode !== NetworkMode.CLIENT) {
-      setTimeout(() => {
-        setChatMessages(prev => prev.filter(m => m.id !== newMessage.id));
-      }, 5000);
-    }
-  };
-
-  // Check if all players are ready to reveal
-  useEffect(() => {
-    if (networkMode === NetworkMode.CLIENT) return;
-    if (phase !== GamePhase.PLAYER_CHOICE) return;
-
-    const allReady = players.every(p => p.selectedCard !== null && p.isReady);
-    if (allReady && players.length > 0) {
-      startRevealPhase();
-    }
-  }, [players, phase, networkMode]);
-
-  const startRevealPhase = () => {
-    setPhase(GamePhase.REVEAL);
-    setTurnDeadline(0); // Stop timer
-    lastProcessedIndexRef.current = -1;
     audioService.playFanfare();
+    
+    // If networked host, sync state
+    if (networkMode === NetworkMode.HOST) {
+       syncState(newPlayers, newRows, GamePhase.PLAYER_CHOICE);
+    }
+  };
 
-    // Collect and sort selected cards
-    const moves = players.map(p => ({
+  // 1. Select Card (Local Only initially)
+  const handleCardSelect = (card: CardData) => {
+    if (phase !== GamePhase.PLAYER_CHOICE) return;
+    
+    const me = getMyPlayer();
+    if (!me) return;
+    // If already ready, cannot change
+    if (me.isReady) return;
+
+    // Just update local state selection, do NOT confirm yet
+    const updatedPlayers = players.map(p => 
+      p.id === myPlayerId ? { ...p, selectedCard: card } : p
+    );
+    setPlayers(updatedPlayers);
+    audioService.playSelect();
+  };
+
+  // 2. Confirm Selection
+  const confirmSelection = () => {
+     const me = getMyPlayer();
+     if (!me || !me.selectedCard) return;
+
+     const updatedPlayers = players.map(p => 
+        p.id === myPlayerId ? { ...p, isReady: true } : p
+     );
+     setPlayers(updatedPlayers);
+     audioService.playClick();
+
+     // Now send to network or check all
+     if (networkMode === NetworkMode.LOCAL) {
+        checkAllPlayersSelected(updatedPlayers);
+     } else if (networkMode === NetworkMode.CLIENT) {
+        firebaseService.sendAction(roomId, {
+            type: 'ACTION_SELECT_CARD',
+            payload: { card: me.selectedCard, playerId: myPlayerId }
+        });
+     } else if (networkMode === NetworkMode.HOST) {
+        checkAllPlayersSelected(updatedPlayers);
+        // Also sync my confirmation to clients
+        syncState(updatedPlayers);
+     }
+  };
+
+  // 3. Cancel Selection
+  const cancelSelection = () => {
+      const me = getMyPlayer();
+      if (!me || me.isReady) return;
+      
+      const updatedPlayers = players.map(p => 
+          p.id === myPlayerId ? { ...p, selectedCard: null } : p
+      );
+      setPlayers(updatedPlayers);
+  };
+
+  const checkAllPlayersSelected = (currentPlayers: Player[]) => {
+    // CRITICAL: Check both selectedCard AND isReady
+    const allSelected = currentPlayers.every(p => !!p.selectedCard && p.isReady);
+    if (allSelected) {
+       revealCards(currentPlayers);
+    }
+  };
+
+  const revealCards = async (currentPlayers: Player[]) => {
+    setPhase(GamePhase.REVEAL);
+    setTurnDeadline(0); // Clear timer during reveal
+    thinkingBotsRef.current.clear();
+    audioService.playAlert();
+
+    // Prepare turn order
+    const turns = currentPlayers.map(p => ({
       playerId: p.id,
       card: p.selectedCard!
     })).sort((a, b) => a.card.id - b.card.id);
 
-    setTurnCards(moves);
+    setTurnCards(turns);
     
-    // Clear selected cards from hands
-    setPlayers(prev => prev.map(p => ({
+    // Remove cards from hands
+    const playersWithoutCards = currentPlayers.map(p => ({
       ...p,
       hand: p.hand.filter(c => c.id !== p.selectedCard!.id),
-      selectedCard: null,
+      selectedCard: null, // Clear selection
       isReady: false
-    })));
+    }));
+    setPlayers(playersWithoutCards);
 
-    // Start resolving after delay
+    if (networkMode === NetworkMode.HOST) {
+       syncState(playersWithoutCards, rows, GamePhase.REVEAL, turns);
+    }
+
+    // Wait a bit then start resolving
     setTimeout(() => {
-      setPhase(GamePhase.RESOLVING);
-      setResolvingIndex(0);
+      startResolving(turns, playersWithoutCards);
     }, 2000);
   };
 
-  // Resolve Loop
-  useEffect(() => {
-    if (networkMode === NetworkMode.CLIENT) return;
-    if (phase !== GamePhase.RESOLVING) return;
-    if (resolvingIndex < 0) return;
+  const startResolving = (turns: {playerId: string, card: CardData}[], currentPlayers: Player[]) => {
+    setPhase(GamePhase.RESOLVING);
+    setResolvingIndex(0);
+    processNextTurn(0, turns, rows, currentPlayers);
+  };
 
-    // Game End Check
-    if (resolvingIndex >= turnCards.length) {
-      finishTurnSet();
-      return;
-    }
-
-    // Prevent double processing
-    if (lastProcessedIndexRef.current === resolvingIndex) return;
-    lastProcessedIndexRef.current = resolvingIndex;
-
-    const turn = turnCards[resolvingIndex];
-    const player = players.find(p => p.id === turn.playerId);
-    if (!player) return;
-
-    audioService.playCardSlide();
-
-    setTimeout(() => {
-      const rowIndex = findTargetRowIndex(turn.card, rows);
-      
-      if (rowIndex === -1) {
-        handleLowCardEvent(player, turn.card);
+  const processNextTurn = async (
+    index: number, 
+    turns: {playerId: string, card: CardData}[], 
+    currentRows: GameRow[], 
+    currentPlayers: Player[]
+  ) => {
+    if (index >= turns.length) {
+      // Round End Check
+      if (currentPlayers[0].hand.length === 0) {
+        calculateScoresAndNextRound();
       } else {
-        placeCardInRow(rowIndex, turn.card, player);
+        setPhase(GamePhase.PLAYER_CHOICE);
+        setTurnCards([]);
+        setResolvingIndex(-1);
+        setTurnDeadline(hostConfig.turnDuration > 0 ? Date.now() + (hostConfig.turnDuration * 1000) : 0);
+        thinkingBotsRef.current.clear();
+        if (networkMode === NetworkMode.HOST) {
+            syncState(currentPlayers, currentRows, GamePhase.PLAYER_CHOICE);
+        }
       }
-    }, 1500); // Delay for animation
-
-  }, [resolvingIndex, phase, networkMode, rows]); // Added rows to dep to avoid stale state
-
-  const handleLowCardEvent = (player: Player, card: CardData) => {
-    if (player.type === PlayerType.HUMAN) {
-      setPhase(GamePhase.CHOOSING_ROW);
-      audioService.playAlert();
-      setUserMessage(`${player.name}, card too low! Choose a row to take.`);
-    } else {
-      // Bot Logic
-      getBotRowChoice(player, rows).then(idx => {
-        executeRowTake(idx, player.id); // Directly execute
-      });
-    }
-  };
-
-  const handleHumanRowSelect = (rowIndex: number, playerId: string) => {
-    if (networkMode === NetworkMode.CLIENT && playerId === myPlayerId) {
-      firebaseService.sendAction(roomId, {
-        type: 'ACTION_SELECT_ROW',
-        payload: { rowIndex, playerId }
-      });
       return;
     }
 
-    // Host checks validity
-    if (phase !== GamePhase.CHOOSING_ROW) return;
-    
-    // Safety check to ensure turnCards is populated
-    if (!turnCards || turnCards.length === 0 || resolvingIndex >= turnCards.length) return;
+    setResolvingIndex(index);
+    const turn = turns[index];
+    const card = turn.card;
+    const rowIndex = findTargetRowIndex(card, currentRows);
 
-    const activePlayerId = turnCards[resolvingIndex].playerId;
-    if (activePlayerId !== playerId) return;
-
-    setUserMessage(`${players.find(p => p.id === playerId)?.name} taking row...`);
-    executeRowTake(rowIndex, playerId);
-  };
-
-  const executeRowTake = (rowIndex: number, playerId: string) => {
-    // Set visual state for all clients
-    setTakingRowIndex(rowIndex);
-    audioService.playTakeRow();
-    
-    const player = players.find(p => p.id === playerId);
-    if (player) {
-      setUserMessage(`${player.name} takes Row ${rowIndex + 1}!`);
+    if (networkMode === NetworkMode.HOST) {
+       syncState(currentPlayers, currentRows, GamePhase.RESOLVING, turns, index);
     }
 
-    // Delay actual state update to allow animation
-    setTimeout(() => {
-      setPlayers(prev => prev.map(p => {
-        if (p.id === playerId) {
-          return { ...p, collectedCards: [...p.collectedCards, ...rows[rowIndex].cards] };
-        }
-        return p;
-      }));
-
-      const cardToPlace = turnCards[resolvingIndex].card;
-      const newRows = [...rows];
-      newRows[rowIndex] = { cards: [cardToPlace] };
-      setRows(newRows);
-
-      // Clear animation and move next
-      setTakingRowIndex(-1);
-      setPhase(GamePhase.RESOLVING);
-      setResolvingIndex(prev => prev + 1);
-    }, 2000); // 2s animation
-  };
-
-  const placeCardInRow = (rowIndex: number, card: CardData, player: Player) => {
-    const targetRow = rows[rowIndex];
-    
-    if (targetRow.cards.length >= 5) {
-      // 6th Card Rule
-      setTakingRowIndex(rowIndex); // Trigger animation
-      audioService.playTakeRow();
-      setUserMessage(`${player.name} takes Row ${rowIndex + 1} (6th Card)!`);
+    // Case 1: Card fits in a row
+    if (rowIndex !== -1) {
+      const targetRow = currentRows[rowIndex];
       
-      setTimeout(() => {
-         setPlayers(prev => prev.map(p => {
-          if (p.id === player.id) {
-            return { ...p, collectedCards: [...p.collectedCards, ...targetRow.cards] };
-          }
-          return p;
-        }));
-
-        const newRows = [...rows];
-        newRows[rowIndex] = { cards: [card] };
-        setRows(newRows);
+      // Case 1a: Row is full (5 cards) -> Take row
+      if (targetRow.cards.length >= 5) {
+        setActivePlayerId(turn.playerId);
+        await animateTakingRow(rowIndex, turn.playerId, currentPlayers, currentRows);
         
-        setTakingRowIndex(-1);
-        setResolvingIndex(prev => prev + 1);
-      }, 2000);
+        // Update state after taking row
+        const updatedPlayers = [...currentPlayers];
+        const playerIdx = updatedPlayers.findIndex(p => p.id === turn.playerId);
+        updatedPlayers[playerIdx].collectedCards = [
+          ...updatedPlayers[playerIdx].collectedCards,
+          ...targetRow.cards
+        ];
 
+        const updatedRows = [...currentRows];
+        updatedRows[rowIndex] = { cards: [card] }; // Replace row with new card
+
+        setPlayers(updatedPlayers);
+        setRows(updatedRows);
+        audioService.playCardSlide();
+
+        setTimeout(() => processNextTurn(index + 1, turns, updatedRows, updatedPlayers), 1000);
+
+      } else {
+        // Case 1b: Just add card
+        const updatedRows = [...currentRows];
+        updatedRows[rowIndex] = { cards: [...targetRow.cards, card] };
+        
+        setRows(updatedRows);
+        audioService.playCardSlide();
+
+        setTimeout(() => processNextTurn(index + 1, turns, updatedRows, currentPlayers), 1000);
+      }
     } else {
-      // Normal Placement
-      const newRows = [...rows];
-      newRows[rowIndex] = { cards: [...targetRow.cards, card] };
-      setRows(newRows);
-      setResolvingIndex(prev => prev + 1);
+      // Case 2: Card is too low -> Must choose row
+      setActivePlayerId(turn.playerId);
+      setPhase(GamePhase.CHOOSING_ROW);
+      // START TIMER FOR ROW SELECTION
+      setTurnDeadline(hostConfig.turnDuration > 0 ? Date.now() + (hostConfig.turnDuration * 1000) : 0);
+      audioService.playAlert();
+      
+      if (networkMode === NetworkMode.HOST) {
+          syncState(currentPlayers, currentRows, GamePhase.CHOOSING_ROW, turns, index, turn.playerId);
+      }
+
+      // If Bot, make decision
+      const player = currentPlayers.find(p => p.id === turn.playerId);
+      if (player && player.type === PlayerType.BOT && networkMode !== NetworkMode.CLIENT) {
+        const chosenRowIndex = await getBotRowChoice(player, currentRows);
+        setTimeout(() => {
+          handleRowSelect(chosenRowIndex, currentPlayers, currentRows, turns, index);
+        }, 1500);
+      }
     }
   };
 
-  const finishTurnSet = () => {
-    // Check if round is over (hands empty)
-    const handEmpty = players[0].hand.length === 0;
-    
-    if (handEmpty) {
-      calculateScoresAndNextRound();
-    } else {
-      setPhase(GamePhase.PLAYER_CHOICE);
-      setResolvingIndex(-1);
-      setTurnCards([]);
-      setTurnDeadline(Date.now() + 20000); // Reset timer for next turn
-      // Trigger bots for next turn
-      triggerBotTurns(players, rows);
+  const handleRowSelect = async (
+    rowIndex: number, 
+    currentPlayers: Player[] = players,
+    currentRows: GameRow[] = rows,
+    currentTurns: {playerId: string, card: CardData}[] = turnCards,
+    currentIndex: number = resolvingIndex
+  ) => {
+    const turn = currentTurns[currentIndex];
+    if (!turn) return;
+
+    // Clear timer
+    setTurnDeadline(0);
+
+    // Animation
+    await animateTakingRow(rowIndex, turn.playerId, currentPlayers, currentRows);
+
+    const updatedPlayers = [...currentPlayers];
+    const playerIdx = updatedPlayers.findIndex(p => p.id === turn.playerId);
+    updatedPlayers[playerIdx].collectedCards = [
+      ...updatedPlayers[playerIdx].collectedCards,
+      ...currentRows[rowIndex].cards
+    ];
+
+    const updatedRows = [...currentRows];
+    updatedRows[rowIndex] = { cards: [turn.card] };
+
+    setPlayers(updatedPlayers);
+    setRows(updatedRows);
+    setPhase(GamePhase.RESOLVING);
+    setTakingRowIndex(-1);
+    setActivePlayerId(null);
+
+    setTimeout(() => processNextTurn(currentIndex + 1, currentTurns, updatedRows, updatedPlayers), 1000);
+  };
+
+  // Wrapper for UI interaction
+  const onUserSelectRow = (rowIndex: number) => {
+    if (phase !== GamePhase.CHOOSING_ROW) return;
+    if (activePlayerId !== myPlayerId) return;
+
+    if (networkMode === NetworkMode.LOCAL) {
+      handleRowSelect(rowIndex);
+    } else if (networkMode === NetworkMode.CLIENT) {
+      firebaseService.sendAction(roomId, {
+         type: 'ACTION_SELECT_ROW',
+         payload: { rowIndex, playerId: myPlayerId }
+      });
     }
+  };
+
+  const animateTakingRow = (rowIndex: number, playerId: string, currentPlayers: Player[], currentRows: GameRow[]) => {
+    return new Promise<void>(resolve => {
+      setTakingRowIndex(rowIndex);
+      const player = currentPlayers.find(p => p.id === playerId);
+      setUserMessage(`${player?.name} takes Row ${rowIndex + 1}!`);
+      audioService.playTakeRow();
+      setTimeout(() => {
+        setTakingRowIndex(-1);
+        setUserMessage("");
+        resolve();
+      }, 1500);
+    });
   };
 
   const calculateScoresAndNextRound = () => {
     // Calculate scores with new players state
     const playersWithScores = players.map(p => {
       const roundScore = calculateRoundScore(p, players);
+      const collected = p.collectedCards || [];
       return {
         ...p,
-        scoreHistory: [...p.scoreHistory, { score: roundScore, heads: p.collectedCards.reduce((s, c) => s + c.bullHeads, 0) }],
+        scoreHistory: [...(p.scoreHistory || []), { score: roundScore, heads: collected.reduce((s, c) => s + c.bullHeads, 0) }],
         totalScore: p.totalScore + roundScore
       };
     });
@@ -693,488 +465,641 @@ const App: React.FC = () => {
     setPhase(GamePhase.ROUND_VOTING); // Enter Voting Phase
     setVotes({});
     setTurnDeadline(0); // Stop timer
-  };
-
-  const handleVote = (playerId: string, vote: boolean) => {
-    if (networkMode === NetworkMode.CLIENT && playerId === myPlayerId) {
-      firebaseService.sendAction(roomId, {
-        type: 'ACTION_VOTE_NEXT_ROUND',
-        payload: { vote, playerId }
-      });
-      return;
-    }
-
-    // Host updates votes
-    const newVotes = { ...votes, [playerId]: vote };
-    setVotes(newVotes);
-
-    // Check for unanimity or rejection
-    const humans = players.filter(p => p.type === PlayerType.HUMAN);
-    const allHumansVoted = humans.every(h => newVotes[h.id] !== undefined);
     
-    if (allHumansVoted) {
-       const anyReject = humans.some(h => newVotes[h.id] === false);
-       
-       if (anyReject) {
-         // End Game
-         setPhase(GamePhase.GAME_END);
-         audioService.playFanfare();
-       } else {
-         // Continue to next round
-         setTimeout(() => {
-           setCurrentRound(prev => prev + 1);
-           startNewRound(players); // Pass updated players (with scores)
-           setIsScoreBoardOpen(false);
-         }, 1000);
-       }
+    if (networkMode === NetworkMode.HOST) {
+        syncState(playersWithScores, rows, GamePhase.ROUND_VOTING);
+    }
+  };
+  
+  const handleVoteNext = () => {
+    const newVotes = { ...votes, [myPlayerId]: true };
+    setVotes(newVotes);
+    
+    if (networkMode === NetworkMode.LOCAL) {
+        // In local, one vote is enough
+        if (currentRound >= MAX_ROUNDS) {
+            setPhase(GamePhase.GAME_END);
+        } else {
+            setCurrentRound(r => r + 1);
+            startRound();
+        }
+    } else if (networkMode === NetworkMode.CLIENT) {
+        firebaseService.sendAction(roomId, {
+            type: 'ACTION_VOTE_NEXT_ROUND',
+            payload: { vote: true, playerId: myPlayerId }
+        });
     }
   };
 
-  // --- Render Helpers ---
+  // --- Chat & Reactions ---
 
-  const myPlayer = players.find(p => p.id === myPlayerId);
+  const handleSendReaction = (content: string, type: 'text' | 'emoji') => {
+    if (!myPlayerId) return;
+    
+    // Add locally immediately
+    const newMsg: ChatMessage = {
+      id: Math.random().toString(),
+      playerId: myPlayerId,
+      playerName: myName,
+      content,
+      type,
+      timestamp: Date.now()
+    };
+    
+    // Keep only last 7 messages
+    setChatMessages(prev => [...prev, newMsg].slice(-7));
+    setIsChatOpen(false); // Close popover
+
+    if (networkMode === NetworkMode.CLIENT) {
+        firebaseService.sendAction(roomId, {
+            type: 'ACTION_SEND_REACTION',
+            payload: { content, type, playerId: myPlayerId }
+        });
+    } else if (networkMode === NetworkMode.HOST) {
+        // Host adds to sync state
+        syncState(players, rows, phase, turnCards, resolvingIndex, activePlayerId, [...chatMessages, newMsg].slice(-7));
+    }
+  };
+
+  // --- Timer Enforcement (Host Only) ---
+  useEffect(() => {
+    if (networkMode === NetworkMode.CLIENT) return; // Only Host enforces timer
+    if (turnDeadline <= 0) return;
+
+    const checkTimer = setInterval(() => {
+        if (Date.now() > turnDeadline) {
+            setTurnDeadline(0); // Stop checking immediately
+
+            // PHASE: PLAYER CHOICE
+            if (phase === GamePhase.PLAYER_CHOICE) {
+                setPlayers(prev => {
+                   let changed = false;
+                   const updated = prev.map(p => {
+                       if (!p.isReady) {
+                           // Random pick
+                           const cardToPlay = p.selectedCard || p.hand[Math.floor(Math.random() * p.hand.length)];
+                           changed = true;
+                           return { ...p, selectedCard: cardToPlay, isReady: true };
+                       }
+                       return p;
+                   });
+                   if (changed) {
+                       if (networkMode === NetworkMode.LOCAL) checkAllPlayersSelected(updated);
+                       else if (networkMode === NetworkMode.HOST) {
+                           checkAllPlayersSelected(updated);
+                           syncState(updated);
+                       }
+                   }
+                   return updated;
+                });
+            } 
+            // PHASE: CHOOSING ROW - Force random selection
+            else if (phase === GamePhase.CHOOSING_ROW) {
+                const randomRowIndex = Math.floor(Math.random() * 4);
+                handleRowSelect(randomRowIndex);
+                // handleRowSelect already syncs state via processNextTurn
+            }
+        }
+    }, 1000);
+    return () => clearInterval(checkTimer);
+  }, [turnDeadline, phase, networkMode]);
+
+  // --- Bot AI Loop ---
+  useEffect(() => {
+    // Only run bots if Host or Local, and in Choice Phase
+    if (phase !== GamePhase.PLAYER_CHOICE || networkMode === NetworkMode.CLIENT) return;
+
+    const botsToMove = players.filter(p => 
+        p.type === PlayerType.BOT && !p.isReady && !thinkingBotsRef.current.has(p.id)
+    );
+
+    if (botsToMove.length === 0) return;
+
+    botsToMove.forEach(async (bot) => {
+        thinkingBotsRef.current.add(bot.id);
+        
+        // Speed Up: Reduce wait time for better responsiveness (0.2s - 1.2s)
+        await new Promise(r => setTimeout(r, Math.random() * 1000 + 200));
+        
+        const card = await getBotDecision(bot, rows, []);
+        
+        setPlayers(prev => {
+            const idx = prev.findIndex(p => p.id === bot.id);
+            // Bot might have been forced by timer already, check again
+            if (idx === -1 || prev[idx].isReady) return prev;
+            
+            const newPlayers = [...prev];
+            newPlayers[idx] = { ...newPlayers[idx], selectedCard: card, isReady: true };
+            
+            // Check if all ready
+            if (networkMode === NetworkMode.LOCAL) checkAllPlayersSelected(newPlayers);
+            else if (networkMode === NetworkMode.HOST) checkAllPlayersSelected(newPlayers);
+            
+            return newPlayers;
+        });
+        // Note: We don't need to remove from thinkingBotsRef because they are now ready and won't be picked up by filter
+    });
+
+  }, [phase, players, rows, networkMode]);
+
+  // --- Networking ---
   
-  // Determine if it's my turn to choose a row (P2P or Local Hotseat logic)
-  const resolvingTurn = resolvingIndex >= 0 && resolvingIndex < turnCards.length ? turnCards[resolvingIndex] : null;
-  const resolvingPlayer = resolvingTurn ? players.find(p => p.id === resolvingTurn.playerId) : null;
-  const resolvingPlayerName = resolvingPlayer?.name;
+  const syncState = (
+      p: Player[] = players, 
+      r: GameRow[] = rows, 
+      ph: GamePhase = phase,
+      tc: {playerId: string, card: CardData}[] = turnCards,
+      ri: number = resolvingIndex,
+      ap: string | null = activePlayerId,
+      msgs: ChatMessage[] = chatMessages
+  ) => {
+      const state: GameState = {
+          players: p, rows: r, phase: ph, currentRound, 
+          activePlayerId: ap, turnCards: tc, resolvingIndex: ri,
+          userMessage, votes, takingRowIndex, turnDeadline, chatMessages: msgs
+      };
+      firebaseService.updateGameState(roomId, state);
+  };
 
-  const isMyTurnToChooseRow = phase === GamePhase.CHOOSING_ROW && (
-    (networkMode === NetworkMode.LOCAL && resolvingPlayer?.type === PlayerType.HUMAN) || 
-    (resolvingPlayer?.id === myPlayerId)
-  );
+  // Host Logic
+  useEffect(() => {
+    if (networkMode === NetworkMode.HOST && roomId) {
+        firebaseService.subscribeToActions(roomId, (msg) => {
+            if (msg.type === 'ACTION_SELECT_CARD') {
+                setPlayers(prev => {
+                    const updated = prev.map(p => p.id === msg.payload.playerId ? { ...p, selectedCard: msg.payload.card, isReady: true } : p);
+                    checkAllPlayersSelected(updated);
+                    return updated;
+                });
+            } else if (msg.type === 'ACTION_SELECT_ROW') {
+                handleRowSelect(msg.payload.rowIndex);
+            } else if (msg.type === 'ACTION_VOTE_NEXT_ROUND') {
+                setVotes(prev => {
+                   const newVotes = { ...prev, [msg.payload.playerId]: true };
+                   const humans = players.filter(p => p.type === PlayerType.HUMAN);
+                   if (humans.every(h => newVotes[h.id])) {
+                       if (currentRound >= MAX_ROUNDS) {
+                           setPhase(GamePhase.GAME_END);
+                           syncState(players, rows, GamePhase.GAME_END);
+                       } else {
+                           setCurrentRound(r => r + 1);
+                           startRound();
+                       }
+                   }
+                   return newVotes;
+                });
+            } else if (msg.type === 'ACTION_SEND_REACTION') {
+                setChatMessages(prev => {
+                    const newMsg: ChatMessage = {
+                        id: Math.random().toString(),
+                        playerId: msg.payload.playerId,
+                        playerName: players.find(p => p.id === msg.payload.playerId)?.name || 'Unknown',
+                        content: msg.payload.content,
+                        type: msg.payload.type,
+                        timestamp: Date.now()
+                    };
+                    const updated = [...prev, newMsg].slice(-7);
+                    // Host syncs this back to everyone
+                    syncState(players, rows, phase, turnCards, resolvingIndex, activePlayerId, updated);
+                    return updated;
+                });
+            } else if (msg.type === 'PLAYER_JOINED') {
+                setPlayers(prev => {
+                    if (prev.some(p => p.id === msg.payload.id)) return prev;
+                    return [...prev, {
+                        id: msg.payload.id,
+                        name: msg.payload.name,
+                        type: PlayerType.HUMAN,
+                        hand: [], collectedCards: [], scoreHistory: [], totalScore: 0, selectedCard: null, isReady: false
+                    }];
+                });
+            }
+        });
+    }
+  }, [networkMode, roomId, players, rows, phase, resolvingIndex, turnCards, chatMessages]);
+
+  // Client Logic
+  useEffect(() => {
+      if (networkMode === NetworkMode.CLIENT && roomId) {
+          firebaseService.subscribeToGameState(roomId, (state) => {
+              setPlayers(state.players || []);
+              setRows(state.rows || []);
+              setPhase(state.phase);
+              setCurrentRound(state.currentRound);
+              setActivePlayerId(state.activePlayerId);
+              setTurnCards(state.turnCards || []);
+              setResolvingIndex(state.resolvingIndex);
+              setTakingRowIndex(state.takingRowIndex);
+              setTurnDeadline(state.turnDeadline || 0);
+              setChatMessages(state.chatMessages || []);
+              
+              if (state.phase === GamePhase.ROUND_VOTING) setIsScoreBoardOpen(true);
+              else if (state.phase === GamePhase.PLAYER_CHOICE) setIsScoreBoardOpen(false);
+          });
+      }
+  }, [networkMode, roomId]);
+
 
   // --- Render ---
 
-  if (phase === GamePhase.LOBBY && !isConnected) {
+  if (phase === GamePhase.LOBBY) {
     return (
-      <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-4">
-        <h1 className="text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-blue-500 mb-8 animate-in fade-in slide-in-from-bottom-4">
-          COW KING
-        </h1>
-        
-        <div className="grid md:grid-cols-2 gap-8 w-full max-w-4xl">
-          {/* Host Card */}
-          <div className="bg-slate-900/50 border border-slate-800 p-8 rounded-2xl hover:border-emerald-500/50 transition-colors group">
-             <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-               <Users className="text-emerald-400" /> Create Game (Host)
-             </h2>
-             
-             <div className="space-y-4">
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">Your Name</label>
-                  <input 
-                    type="text" 
-                    value={hostName} 
-                    onChange={(e) => setHostName(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 focus:ring-2 focus:ring-emerald-500 outline-none"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm text-slate-400 mb-1">Total Players</label>
-                    <select 
-                      value={config.totalPlayers} 
-                      onChange={(e) => setConfig({...config, totalPlayers: Number(e.target.value)})}
-                      className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2"
-                    >
-                      {[2,3,4,5,6,7,8].map(n => <option key={n} value={n}>{n}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm text-slate-400 mb-1">Humans</label>
-                    <select 
-                      value={numHumans} 
-                      onChange={(e) => setNumHumans(Number(e.target.value))}
-                      className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2"
-                    >
-                      {Array.from({length: config.totalPlayers}, (_, i) => i + 1).map(n => (
-                        <option key={n} value={n}>{n}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                <div className="text-sm text-slate-500 flex items-center gap-2">
-                  <Bot size={16} /> Bots: {config.totalPlayers - numHumans}
-                </div>
-
-                <div className="flex gap-2 pt-4">
-                  <button 
-                    onClick={startGame}
-                    className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded-lg transition-all"
-                  >
-                    Play Local (Hotseat)
-                  </button>
-                  <button 
-                    onClick={initHost}
-                    className="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg transition-all"
-                  >
-                    Host Online
-                  </button>
-                </div>
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+         <div className="flex flex-col md:flex-row gap-6 w-full max-w-4xl">
+             {/* Left: Local Game */}
+             <div className="flex-1 bg-slate-800 p-8 rounded-2xl shadow-2xl border border-slate-700">
+                 <h2 className="text-2xl font-bold text-emerald-400 mb-4 flex items-center gap-2">
+                     <PlayCircle /> Local / Solo
+                 </h2>
+                 <div className="space-y-4">
+                     <div>
+                         <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Total Players</label>
+                         <select 
+                            className="w-full bg-slate-900 border border-slate-700 text-white p-2 rounded"
+                            value={hostConfig.totalPlayers}
+                            onChange={(e) => setHostConfig({...hostConfig, totalPlayers: Number(e.target.value)})}
+                         >
+                             {[2,3,4,5,6,7,8].map(n => <option key={n} value={n}>{n} Players</option>)}
+                         </select>
+                     </div>
+                     <div>
+                         <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Human Players</label>
+                         <select 
+                            className="w-full bg-slate-900 border border-slate-700 text-white p-2 rounded"
+                            value={hostConfig.localHumans}
+                            onChange={(e) => setHostConfig({...hostConfig, localHumans: Number(e.target.value)})}
+                         >
+                             {Array.from({length: hostConfig.totalPlayers}, (_, i) => i + 1).map(n => 
+                                 <option key={n} value={n}>{n} Human{n>1?'s':''}</option>
+                             )}
+                         </select>
+                     </div>
+                     <div className="text-sm text-slate-400 pt-2">
+                         Bots: <span className="text-white font-bold">{Math.max(0, hostConfig.totalPlayers - hostConfig.localHumans)}</span>
+                     </div>
+                     <button 
+                         onClick={() => {
+                             setMyPlayerId('p1');
+                             startRound();
+                         }}
+                         className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg mt-4"
+                     >
+                         Start Local Game
+                     </button>
+                 </div>
              </div>
-          </div>
 
-          {/* Join Card */}
-          <div className="bg-slate-900/50 border border-slate-800 p-8 rounded-2xl hover:border-blue-500/50 transition-colors">
-            <h2 className="text-2xl font-bold mb-4 flex items-center gap-2">
-               <Users className="text-blue-400" /> Join Game
-             </h2>
-             
-             <div className="space-y-4">
-               <div>
-                  <label className="block text-sm text-slate-400 mb-1">Your Name</label>
-                  <input 
-                    type="text" 
-                    value={clientName} 
-                    onChange={(e) => setClientName(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none"
-                  />
-                </div>
+             {/* Right: Online Game */}
+             <div className="flex-1 bg-slate-800 p-8 rounded-2xl shadow-2xl border border-slate-700">
+                 <h2 className="text-2xl font-bold text-blue-400 mb-4 flex items-center gap-2">
+                     <Users /> Online Multiplayer
+                 </h2>
+                 
+                 {!roomId ? (
+                     <div className="space-y-6">
+                         <div className="p-4 bg-slate-900 rounded-lg border border-slate-700">
+                             <h3 className="text-white font-bold mb-2">Create Room</h3>
+                             <div className="flex gap-4 mb-3">
+                               <div className="flex-1">
+                                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Total Slots</label>
+                                  <select 
+                                      className="w-full bg-slate-800 border border-slate-600 text-white p-2 rounded"
+                                      value={hostConfig.totalPlayers}
+                                      onChange={(e) => setHostConfig({...hostConfig, totalPlayers: Number(e.target.value)})}
+                                  >
+                                      {[2,3,4,5,6,7,8].map(n => <option key={n} value={n}>{n} Players</option>)}
+                                  </select>
+                                </div>
+                               <div className="flex-1">
+                                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Turn Timer</label>
+                                  <select 
+                                      className="w-full bg-slate-800 border border-slate-600 text-white p-2 rounded"
+                                      value={hostConfig.turnDuration}
+                                      onChange={(e) => setHostConfig({...hostConfig, turnDuration: Number(e.target.value)})}
+                                  >
+                                      <option value={10}>10s Fast</option>
+                                      <option value={20}>20s Normal</option>
+                                      <option value={30}>30s Slow</option>
+                                      <option value={60}>60s Relaxed</option>
+                                      <option value={0}>Unlimited</option>
+                                  </select>
+                               </div>
+                             </div>
+                             <button 
+                                 onClick={async () => {
+                                     const id = await firebaseService.createRoom();
+                                     setRoomId(id);
+                                     setNetworkMode(NetworkMode.HOST);
+                                     setMyPlayerId('host');
+                                     setPlayers([{ id: 'host', name: myName, type: PlayerType.HUMAN, hand: [], collectedCards: [], scoreHistory: [], totalScore: 0, selectedCard: null, isReady: false }]);
+                                 }}
+                                 className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded"
+                             >
+                                 Create as Host
+                             </button>
+                         </div>
 
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">Enter 4-Digit Room ID</label>
-                  <input 
-                    type="text" 
-                    value={joinRoomIdInput} 
-                    onChange={(e) => setJoinRoomIdInput(e.target.value)}
-                    placeholder="e.g. 1234"
-                    maxLength={4}
-                    className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none font-mono tracking-widest text-center text-xl"
-                  />
-                </div>
+                         <div className="p-4 bg-slate-900 rounded-lg border border-slate-700">
+                             <h3 className="text-white font-bold mb-2">Join Room</h3>
+                             <div className="flex gap-2">
+                                <input 
+                                    className="flex-1 bg-slate-800 border border-slate-600 text-white p-2 rounded uppercase font-mono"
+                                    placeholder="1234"
+                                    value={joinRoomId}
+                                    onChange={(e) => setJoinRoomId(e.target.value)}
+                                />
+                                <button 
+                                    onClick={async () => {
+                                        const success = await firebaseService.joinRoom(joinRoomId);
+                                        if (success) {
+                                            setRoomId(joinRoomId);
+                                            setNetworkMode(NetworkMode.CLIENT);
+                                            let pid = localStorage.getItem('cow_king_pid');
+                                            if (!pid || pid === 'host') {
+                                                pid = 'p-' + Math.floor(Math.random() * 10000);
+                                                setMyPlayerId(pid);
+                                            } else {
+                                                setMyPlayerId(pid);
+                                            }
+                                            firebaseService.sendAction(joinRoomId, { type: 'PLAYER_JOINED', payload: { id: pid, name: myName } });
+                                        } else {
+                                            alert("Room not found!");
+                                        }
+                                    }}
+                                    className="px-4 bg-slate-700 hover:bg-slate-600 text-white font-bold rounded"
+                                >
+                                    Join
+                                </button>
+                             </div>
+                         </div>
+                     </div>
+                 ) : (
+                     // Host Lobby View
+                     <div className="text-center space-y-4">
+                         <div className="text-4xl font-mono text-yellow-400 font-black tracking-widest mb-2">{roomId}</div>
+                         <p className="text-slate-400 text-sm">Share this ID with friends</p>
+                         
+                         <div className="bg-slate-900 p-4 rounded-lg text-left max-h-48 overflow-y-auto">
+                             <div className="flex justify-between text-xs text-slate-500 uppercase font-bold mb-2">
+                                 <span>Players ({players.length}/{hostConfig.totalPlayers})</span>
+                                 <span>Bots: {Math.max(0, hostConfig.totalPlayers - players.length)}</span>
+                             </div>
+                             <div className="space-y-1">
+                                 {players.map(p => (
+                                     <div key={p.id} className="flex items-center gap-2">
+                                         <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                                         <span className="text-white">{p.name}</span>
+                                         {p.id === myPlayerId && <span className="text-xs text-slate-500">(You)</span>}
+                                     </div>
+                                 ))}
+                             </div>
+                         </div>
 
-                <button 
-                  onClick={joinGame}
-                  disabled={isJoining}
-                  className="w-full mt-4 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 text-white font-bold py-3 rounded-lg transition-all flex items-center justify-center gap-2"
-                >
-                  {isJoining ? <Loader2 className="animate-spin" /> : 'Join Room'}
-                </button>
+                         {networkMode === NetworkMode.HOST && (
+                             <button 
+                                 onClick={startRound}
+                                 className="w-full py-3 bg-yellow-600 hover:bg-yellow-500 text-white font-bold rounded-lg animate-pulse"
+                             >
+                                 Start Game
+                             </button>
+                         )}
+                         <div className="text-xs text-slate-500">
+                             Waiting for host to start...
+                         </div>
+                     </div>
+                 )}
              </div>
-          </div>
-        </div>
+         </div>
+         
+         <div className="fixed bottom-4 text-slate-600 text-xs">
+             Your Name: 
+             <input 
+                className="bg-transparent border-b border-slate-600 text-slate-400 ml-2 focus:outline-none focus:border-slate-400"
+                value={myName}
+                onChange={(e) => setMyName(e.target.value)}
+             />
+         </div>
       </div>
     );
   }
 
-  // --- Main Game Render ---
+  // --- Main Game UI ---
 
-  // Check if it's currently my turn in the UI
-  const myHand = myPlayer ? myPlayer.hand : [];
-  const isMyTurn = phase === GamePhase.PLAYER_CHOICE && myPlayer?.selectedCard === null;
+  const myPlayer = getMyPlayer();
+  
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-yellow-500/30 flex flex-col overflow-hidden">
+       
+       {/* Chat Overlay (RIGHT SIDE) */}
+       <div className="fixed top-32 right-4 z-40 flex flex-col gap-2 w-64 pointer-events-none items-end">
+           {chatMessages.map(msg => (
+               <div key={msg.id} className="animate-in slide-in-from-right fade-in duration-300 flex flex-col items-end">
+                   <div className={`
+                       px-4 py-2 rounded-2xl shadow-lg backdrop-blur-sm border border-white/10 text-right
+                       ${msg.type === 'emoji' ? 'bg-transparent text-4xl border-none p-0' : 'bg-black/60 text-white text-sm'}
+                   `}>
+                       <span className="text-[10px] text-yellow-500 font-bold block mb-0.5 opacity-80">{msg.playerName}</span>
+                       {msg.content}
+                   </div>
+               </div>
+           ))}
+       </div>
 
-  // Waiting Lobby (Host View)
-  if (networkMode === NetworkMode.HOST && phase === GamePhase.LOBBY && isConnected) {
-    return (
-      <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-4">
-        <div className="bg-slate-900 p-8 rounded-2xl border border-slate-700 max-w-md w-full text-center">
-          <h2 className="text-3xl font-bold mb-2 text-emerald-400">Room Created!</h2>
-          <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 my-6">
-            <span className="text-slate-500 text-sm uppercase tracking-widest">Room ID</span>
-            <div className="text-6xl font-mono font-black tracking-wider mt-2 text-white select-all">
-              {roomId}
-            </div>
+       {/* Header */}
+       <header className="h-14 sm:h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-4 z-20 relative">
+          <div className="flex items-center gap-2 sm:gap-4">
+             <div className="text-yellow-500 font-black text-xl tracking-tighter hidden sm:block">牛頭王 - 遠離賭博</div>
+             <div className="bg-slate-800 px-3 py-1 rounded-full text-xs font-mono text-slate-400 border border-slate-700 flex items-center gap-2">
+                <span>R {currentRound}/{MAX_ROUNDS}</span>
+                {turnDeadline === 0 && phase === GamePhase.PLAYER_CHOICE && (
+                    <span className="text-blue-400 flex items-center gap-1 font-bold"><Clock size={12}/> ∞</span>
+                )}
+             </div>
           </div>
           
-          <div className="space-y-2 mb-8">
-            <h3 className="text-slate-400 font-bold text-sm uppercase">Players Joined ({players.length}/{config.totalPlayers})</h3>
-            {players.map(p => (
-              <div key={p.id} className="flex items-center gap-2 justify-center text-lg">
-                 <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-                 {p.name}
-              </div>
-            ))}
+          <div className="flex items-center gap-2">
+             <button onClick={() => setIsScoreBoardOpen(true)} className="p-2 hover:bg-slate-800 rounded-full text-slate-400 hover:text-white transition">
+                <Trophy size={20} />
+             </button>
+             <button onClick={() => {
+                 const m = audioService.toggleMute();
+                 setIsMuted(m);
+             }} className="p-2 hover:bg-slate-800 rounded-full text-slate-400 hover:text-white transition">
+                {isMuted ? <VolumeX size={20} /> : <Volume2 size={20} />}
+             </button>
+             <button onClick={() => window.location.reload()} className="p-2 hover:bg-red-900/30 text-red-400 rounded-full transition">
+                <LogOut size={20} />
+             </button>
           </div>
-
-          <button 
-            onClick={startGame}
-            className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 text-white font-bold py-4 rounded-xl transition-all text-xl"
-          >
-            Start Game
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // Waiting Lobby (Client View)
-  if (networkMode === NetworkMode.CLIENT && phase === GamePhase.LOBBY) {
-    return (
-      <div className="min-h-screen bg-slate-950 text-white flex flex-col items-center justify-center p-4">
-         <Loader2 size={48} className="text-blue-500 animate-spin mb-4" />
-         <h2 className="text-2xl font-bold">Connected to Room {roomId}</h2>
-         <p className="text-slate-400 mt-2">Waiting for host to start...</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 flex flex-col overflow-hidden">
-      {/* Top Bar */}
-      <div className="bg-slate-900 border-b border-slate-800 p-2 sm:p-4 flex items-center justify-between shadow-xl z-20">
-        <div className="flex items-center gap-4">
-          <h1 className="text-xl sm:text-2xl font-black text-emerald-400 hidden sm:block">COW KING</h1>
-          <div className="flex items-center gap-2 text-sm sm:text-base bg-slate-800 px-3 py-1 rounded-full border border-slate-700">
-            <RotateCcw size={16} className="text-slate-400"/>
-            <span>Round <span className="text-white font-bold">{currentRound}</span></span>
-          </div>
-        </div>
-
-        {/* Timer Badge */}
-        {phase === GamePhase.PLAYER_CHOICE && timeLeft > 0 && (
-           <div className={`
-             flex items-center gap-2 px-4 py-1.5 rounded-full font-mono font-bold text-lg shadow-lg border transition-all
-             ${timeLeft <= 5 
-               ? 'bg-red-900/80 text-red-200 border-red-500 animate-pulse shadow-[0_0_15px_rgba(220,38,38,0.5)]' 
-               : 'bg-slate-800 text-white border-slate-600'}
-           `}>
-              <Clock size={20} className={timeLeft <= 5 ? 'animate-spin' : ''} />
-              {timeLeft}s
-           </div>
-        )}
-
-        <div className="flex items-center gap-2 sm:gap-4">
-           {/* Player Status Bar */}
-           <div className="flex items-center gap-2 overflow-x-auto max-w-[200px] sm:max-w-md no-scrollbar">
-             {players.map(p => (
-               <div 
-                  key={p.id} 
-                  className={`
-                    relative flex items-center gap-1 px-2 py-1 rounded text-xs font-bold whitespace-nowrap border
-                    ${p.id === resolvingPlayerName ? 'bg-yellow-500/20 border-yellow-500 text-yellow-200' : 'bg-slate-800 border-slate-700 text-slate-400'}
-                    ${p.isReady ? 'border-green-500/50' : ''}
-                  `}
-                >
-                  {p.isReady && <CheckCircle2 size={10} className="text-green-400" />}
-                  {p.name}
-                  <span className="bg-slate-900 px-1 rounded text-slate-500">{p.totalScore}</span>
-               </div>
-             ))}
-           </div>
-
-           <button onClick={toggleMute} className="p-2 hover:bg-slate-800 rounded-full">
-             {isMuted ? <VolumeX size={20} /> : <Volume2 size={20} />}
-           </button>
-
-           <button 
-             onClick={() => setIsScoreBoardOpen(true)}
-             className="bg-slate-800 hover:bg-slate-700 text-white px-3 py-1.5 rounded-lg font-bold text-sm border border-slate-600 transition-colors"
-           >
-             Scores
-           </button>
-        </div>
-      </div>
-      
-      {/* Main Game Area */}
-      <div className="flex-1 relative flex flex-col overflow-y-auto overflow-x-hidden bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-slate-950">
-         
-         {/* BIG CHAT OVERLAY (Stacked Messages) */}
-         <div className="absolute top-4 left-2 sm:left-4 z-40 flex flex-col gap-2 w-[250px] sm:w-[350px] pointer-events-none">
-            {chatMessages.map((msg) => (
-               <div key={msg.id} className="animate-in slide-in-from-left-10 fade-in duration-300 flex flex-col items-start">
-                  <div className="flex items-center gap-2">
-                     <div className="bg-slate-900/80 text-slate-300 text-[10px] px-2 py-0.5 rounded-full border border-slate-700">
-                       {msg.playerName}
-                     </div>
-                  </div>
-                  <div className={`
-                    mt-1 px-4 py-2 rounded-2xl rounded-tl-none shadow-lg backdrop-blur-md border border-slate-500/30 text-white
-                    ${msg.type === 'emoji' ? 'text-4xl bg-slate-800/60' : 'text-lg font-medium bg-blue-600/80'}
-                  `}>
-                     {msg.content}
-                  </div>
-               </div>
-            ))}
-         </div>
-
-         {/* Message Overlay (System/Game Toast) */}
-         {userMessage && (
-           <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-slate-800/90 backdrop-blur border border-slate-600 text-white px-6 py-2 rounded-full shadow-xl z-40 animate-in fade-in slide-in-from-top-4 font-medium text-center max-w-[90%]">
-             {userMessage}
-           </div>
-         )}
-
-         {/* Game Board */}
-         <GameBoard 
-           rows={rows} 
-           phase={phase} 
-           onSelectRow={(idx) => handleHumanRowSelect(idx, myPlayerId)} 
-           takingRowIndex={takingRowIndex}
-           turnCards={turnCards}
-           resolvingIndex={resolvingIndex}
-           players={players}
-           isMyTurnToChooseRow={isMyTurnToChooseRow}
-           choosingPlayerName={resolvingPlayerName}
-         />
-
-         {/* Voting Overlay */}
-         {phase === GamePhase.ROUND_VOTING && (
-           <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm animate-in fade-in">
-              <div className="bg-slate-900 p-8 rounded-2xl border border-slate-700 shadow-2xl max-w-md w-full text-center">
-                 <h2 className="text-2xl font-bold mb-4">Round Finished!</h2>
-                 <p className="text-slate-400 mb-8">Do you want to continue to the next round?</p>
-                 
-                 {myPlayer && votes[myPlayer.id] === undefined ? (
-                   <div className="flex gap-4">
-                      <button 
-                        onClick={() => handleVote(myPlayer.id, false)}
-                        className="flex-1 bg-red-900/50 hover:bg-red-900 border border-red-800 text-red-200 py-4 rounded-xl font-bold transition-all flex flex-col items-center gap-2"
-                      >
-                        <XCircle /> Stop Game
-                      </button>
-                      <button 
-                        onClick={() => handleVote(myPlayer.id, true)}
-                        className="flex-1 bg-emerald-600 hover:bg-emerald-500 border border-emerald-400 text-white py-4 rounded-xl font-bold transition-all flex flex-col items-center gap-2"
-                      >
-                        <Play /> Keep Playing
-                      </button>
-                   </div>
-                 ) : (
-                   <div className="text-emerald-400 font-bold flex items-center justify-center gap-2">
-                     <CheckCircle2 /> Vote Submitted
-                   </div>
-                 )}
-
-                 <div className="mt-8 pt-8 border-t border-slate-800">
-                   <h3 className="text-xs font-bold text-slate-500 uppercase mb-4">Voting Status</h3>
-                   <div className="grid grid-cols-2 gap-2">
-                      {players.filter(p => p.type === PlayerType.HUMAN).map(p => (
-                        <div key={p.id} className="flex items-center justify-between bg-slate-950 px-3 py-2 rounded border border-slate-800">
-                          <span className="text-sm">{p.name}</span>
-                          {votes[p.id] === undefined && <span className="text-slate-500 text-xs">Thinking...</span>}
-                          {votes[p.id] === true && <CheckCircle2 size={16} className="text-emerald-500" />}
-                          {votes[p.id] === false && <XCircle size={16} className="text-red-500" />}
-                        </div>
-                      ))}
-                   </div>
+          
+          {/* BIG TIMER (Positioned Top Left) */}
+          {turnDeadline > 0 && (phase === GamePhase.PLAYER_CHOICE || phase === GamePhase.CHOOSING_ROW) && (
+              <div className="absolute top-16 left-4 z-40 pointer-events-none">
+                 <div className={`
+                    flex flex-col items-center justify-center px-6 py-2 rounded-xl shadow-2xl border-2 backdrop-blur-xl transition-all duration-300
+                    ${timeLeft < 5 
+                        ? 'bg-red-600/90 border-red-400 text-white animate-pulse scale-110' 
+                        : 'bg-slate-900/90 border-emerald-500 text-emerald-400'}
+                 `}>
+                    <div className="flex items-center gap-2">
+                        <AlarmClock size={24} className={timeLeft < 5 ? 'animate-bounce' : ''} />
+                        <span className="text-3xl font-black font-mono tracking-widest filter drop-shadow-lg">
+                            {timeLeft}s
+                        </span>
+                    </div>
+                    <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">
+                        {phase === GamePhase.CHOOSING_ROW ? 'Pick Row!' : 'Pick Card'}
+                    </span>
                  </div>
               </div>
-           </div>
-         )}
+          )}
+       </header>
 
-         {/* Chat Button & Popover */}
-         <div className="absolute bottom-24 sm:bottom-32 right-4 z-50">
-            {isChatOpen && (
-               <div className="absolute bottom-14 right-0 w-64 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl p-3 animate-in slide-in-from-bottom-5 fade-in">
-                  <div className="grid grid-cols-3 gap-2 mb-3 h-48 overflow-y-auto no-scrollbar">
-                    {PRESET_REACTIONS.map(emoji => (
-                      <button
-                        key={emoji}
-                        onClick={() => handleSendReaction(emoji, 'emoji')}
-                        className="text-sm hover:bg-slate-700 p-2 rounded transition-colors bg-slate-900 border border-slate-700"
+       {/* Main Board Area */}
+       <main className="flex-1 relative overflow-hidden flex flex-col">
+          <GameBoard 
+             rows={rows}
+             phase={phase}
+             takingRowIndex={takingRowIndex}
+             turnCards={turnCards}
+             resolvingIndex={resolvingIndex}
+             players={players}
+             onSelectRow={onUserSelectRow}
+             isMyTurnToChooseRow={activePlayerId === myPlayerId && phase === GamePhase.CHOOSING_ROW}
+             choosingPlayerName={players.find(p => p.id === activePlayerId)?.name}
+             myPlayerId={myPlayerId}
+          />
+
+          {/* Hand Area */}
+          <div className="relative z-30 bg-slate-900/80 backdrop-blur-md border-t border-slate-800 pt-10 pb-4 sm:pb-6 transition-all duration-300">
+             {/* CONFIRM BUTTON OVERLAY */}
+             {myPlayer?.selectedCard && !myPlayer?.isReady && (
+                 <div className="absolute top-[-3.5rem] left-1/2 -translate-x-1/2 flex gap-2 animate-in zoom-in-90 duration-200">
+                     <button 
+                         onClick={confirmSelection}
+                         className="bg-emerald-500 hover:bg-emerald-400 text-white font-bold py-2 px-6 rounded-full shadow-lg shadow-emerald-500/20 flex items-center gap-2 active:scale-95 transition-transform"
+                     >
+                         <Check size={18} strokeWidth={3} /> CONFIRM
+                     </button>
+                     <button 
+                         onClick={cancelSelection}
+                         className="bg-slate-700 hover:bg-slate-600 text-slate-300 font-bold py-2 px-4 rounded-full shadow-lg flex items-center gap-2 active:scale-95 transition-transform"
+                     >
+                         <RefreshCcw size={18} />
+                     </button>
+                 </div>
+             )}
+             
+             {/* Waiting Indicator */}
+             {myPlayer?.isReady && phase === GamePhase.PLAYER_CHOICE && (
+                 <div className="absolute top-[-2.5rem] left-1/2 -translate-x-1/2 bg-black/50 backdrop-blur px-4 py-1 rounded-full text-sm text-emerald-400 font-bold animate-pulse">
+                     Card Played. Waiting for others...
+                 </div>
+             )}
+
+             <div className="max-w-6xl mx-auto px-2 sm:px-4">
+                <div className="flex justify-between items-center mb-2 relative">
+                   <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Your Hand</span>
+                   {/* Chat Toggle */}
+                   <div className="absolute -top-6 right-0">
+                       <div className="relative">
+                           {isChatOpen && (
+                               <div className="absolute bottom-12 right-0 w-64 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl p-3 animate-in slide-in-from-bottom-5">
+                                   <div className="grid grid-cols-4 gap-2 mb-3 max-h-40 overflow-y-auto no-scrollbar">
+                                       {PRESET_REACTIONS.map(r => (
+                                           <button 
+                                             key={r} 
+                                             onClick={() => handleSendReaction(r, r.length > 2 ? 'text' : 'emoji')}
+                                             className="p-2 hover:bg-slate-700 rounded text-xl transition-colors"
+                                           >
+                                             {r}
+                                           </button>
+                                       ))}
+                                   </div>
+                                   <div className="flex gap-2">
+                                       <input 
+                                          className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 text-sm text-white"
+                                          placeholder="Say something..."
+                                          value={chatInput}
+                                          onChange={e => setChatInput(e.target.value)}
+                                          onKeyDown={e => e.key === 'Enter' && handleSendReaction(chatInput, 'text')}
+                                       />
+                                       <button 
+                                         onClick={() => handleSendReaction(chatInput, 'text')}
+                                         disabled={!chatInput.trim()}
+                                         className="p-2 bg-blue-600 hover:bg-blue-500 rounded text-white disabled:opacity-50"
+                                       >
+                                          <Send size={14}/>
+                                       </button>
+                                   </div>
+                               </div>
+                           )}
+                           <button 
+                               onClick={() => setIsChatOpen(!isChatOpen)}
+                               className={`p-3 rounded-full shadow-lg transition-all ${isChatOpen ? 'bg-slate-700 text-white' : 'bg-slate-800 text-blue-400 hover:bg-slate-700'}`}
+                           >
+                               {isChatOpen ? <X size={20}/> : <MessageSquare size={20}/>}
+                           </button>
+                       </div>
+                   </div>
+                </div>
+                
+                <div className="flex justify-center gap-[-10px] sm:gap-2 overflow-x-auto py-2 px-4 -ml-12 no-scrollbar mask-fade-sides min-h-[120px]">
+                   {myPlayer?.hand
+                     // Filter out the selected card ONLY if the player is READY (confirmed)
+                     .filter(card => !myPlayer.isReady || (myPlayer.selectedCard?.id !== card.id))
+                     .map((card) => (
+                      <div 
+                        key={card.id} 
+                        className={`transform transition-all duration-200 
+                            ${myPlayer.selectedCard?.id === card.id ? '-translate-y-8 z-20 scale-110' : 'hover:-translate-y-4 hover:z-10 hover:scale-105'}
+                            ${phase !== GamePhase.PLAYER_CHOICE ? 'opacity-50 grayscale cursor-not-allowed' : ''}
+                        `}
                       >
-                        {emoji}
-                      </button>
-                    ))}
-                  </div>
-                  <form 
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      if (chatInput.trim()) handleSendReaction(chatInput, 'text');
-                    }}
-                    className="flex gap-2"
-                  >
-                    <input 
-                      type="text"
-                      value={chatInput}
-                      onChange={(e) => setChatInput(e.target.value)}
-                      maxLength={20}
-                      placeholder="Say something..."
-                      className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500"
-                    />
-                    <button type="submit" className="bg-blue-600 p-1.5 rounded hover:bg-blue-500">
-                      <Send size={14} />
-                    </button>
-                  </form>
-               </div>
-            )}
-            <button 
-              onClick={() => setIsChatOpen(!isChatOpen)}
-              className={`
-                w-12 h-12 rounded-full shadow-lg flex items-center justify-center transition-all
-                ${isChatOpen ? 'bg-blue-600 text-white rotate-45' : 'bg-slate-700 text-slate-300 hover:bg-slate-600 hover:text-white'}
-              `}
-            >
-               {isChatOpen ? <XCircle size={24} /> : <MessageSquare size={24} />}
-            </button>
-         </div>
+                         <Card 
+                           id={card.id} 
+                           bullHeads={card.bullHeads} 
+                           onClick={() => handleCardSelect(card)}
+                           selected={myPlayer.selectedCard?.id === card.id}
+                           disabled={phase !== GamePhase.PLAYER_CHOICE}
+                         />
+                      </div>
+                   ))}
+                   {(!myPlayer?.hand || myPlayer.hand.length === 0) && (
+                      <div className="text-slate-600 text-sm italic py-8 w-full text-center ml-12">
+                         {phase === GamePhase.LOBBY ? 'Waiting to start...' : 'No cards left'}
+                      </div>
+                   )}
+                </div>
+             </div>
+          </div>
+       </main>
 
-         {/* Player Hand Area */}
-         <div className="mt-auto bg-slate-900/80 border-t border-slate-800 pt-10 pb-4 sm:pb-8 px-2 sm:px-4 backdrop-blur-md relative z-30">
-            
-            {/* Confirm Selection Overlay */}
-            {myPlayer?.selectedCard && !myPlayer.isReady && phase === GamePhase.PLAYER_CHOICE && (
-               <div className="absolute -top-16 left-1/2 -translate-x-1/2 flex gap-2 animate-in slide-in-from-bottom-4 fade-in">
-                  <div className="bg-slate-800 text-white px-4 py-2 rounded-lg border border-slate-600 shadow-xl flex items-center gap-2">
-                     <span className="text-slate-400 text-sm">Selected:</span>
-                     <span className="font-bold text-emerald-400">#{myPlayer.selectedCard.id}</span>
-                  </div>
-                  <button 
-                    onClick={() => handleToggleReady(myPlayer.id, true)}
-                    className="bg-emerald-500 hover:bg-emerald-400 text-white font-bold px-6 py-2 rounded-lg shadow-lg shadow-emerald-900/50 transition-all flex items-center gap-2"
-                  >
-                    <CheckCircle2 size={18} /> CONFIRM
-                  </button>
-               </div>
-            )}
+       {/* Scoreboard Modal */}
+       <ScoreBoard 
+         isOpen={isScoreBoardOpen} 
+         onClose={() => phase !== GamePhase.ROUND_VOTING && setIsScoreBoardOpen(false)} 
+         players={players} 
+         currentRound={currentRound}
+       />
 
-            {/* Unready Button */}
-            {myPlayer?.isReady && phase === GamePhase.PLAYER_CHOICE && (
-               <div className="absolute -top-14 left-1/2 -translate-x-1/2">
-                  <button 
-                    onClick={() => handleToggleReady(myPlayer.id, false)}
-                    className="bg-slate-700/80 hover:bg-slate-600 text-slate-300 font-bold px-4 py-2 rounded-full border border-slate-500 backdrop-blur text-sm flex items-center gap-2"
-                  >
-                    <RotateCcw size={14} /> Change Card
-                  </button>
-               </div>
-            )}
-
-            {/* Hand Scroll Container */}
-            <div className="flex justify-center overflow-x-auto no-scrollbar pb-4 pt-4 min-h-[160px]">
-              <div className="flex -space-x-12 px-12 min-w-max">
-                {myHand.map((card) => (
-                  <div 
-                    key={card.id} 
-                    className={`transform transition-all duration-300 hover:z-10 hover:-translate-y-4 ${myPlayer?.selectedCard?.id === card.id ? '-translate-y-6 z-20' : ''}`}
-                  >
-                    <Card 
-                      id={card.id} 
-                      bullHeads={card.bullHeads} 
-                      onClick={() => {
-                        if (phase === GamePhase.PLAYER_CHOICE && !myPlayer?.isReady) {
-                          handleCardSelection(myPlayerId, card);
-                        }
-                      }}
-                      selected={myPlayer?.selectedCard?.id === card.id}
-                      disabled={phase !== GamePhase.PLAYER_CHOICE || myPlayer?.isReady}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-            
-            {/* Helper text */}
-            <div className="text-center text-slate-500 text-xs sm:text-sm font-medium mt-[-10px]">
-              {phase === GamePhase.PLAYER_CHOICE 
-                ? (myPlayer?.isReady ? "Waiting for others..." : "Pick a card to play") 
-                : "Watch the round unfold..."}
-            </div>
-         </div>
-      </div>
-
-      {/* Scoreboard Modal */}
-      <ScoreBoard 
-        players={players} 
-        currentRound={currentRound} 
-        isOpen={isScoreBoardOpen || phase === GamePhase.GAME_END} 
-        onClose={() => setIsScoreBoardOpen(false)} 
-      />
+       {/* Voting Overlay */}
+       {phase === GamePhase.ROUND_VOTING && (
+           <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-bottom-10">
+               <button 
+                 onClick={handleVoteNext}
+                 disabled={votes[myPlayerId]}
+                 className={`
+                    px-8 py-3 rounded-full font-bold text-lg shadow-2xl flex items-center gap-2 transition-transform active:scale-95
+                    ${votes[myPlayerId] ? 'bg-slate-600 text-slate-400 cursor-wait' : 'bg-emerald-500 hover:bg-emerald-400 text-white'}
+                 `}
+               >
+                  {votes[myPlayerId] ? 'Waiting for others...' : 'Next Round'} <Play size={20} fill="currentColor" />
+               </button>
+           </div>
+       )}
     </div>
   );
-};
+}
 
 export default App;

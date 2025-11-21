@@ -1,3 +1,4 @@
+
 import { GoogleGenAI, Type } from "@google/genai";
 import { CardData, GameRow, Player } from '../types';
 import { findTargetRowIndex, sumBullHeads } from './gameLogic';
@@ -23,41 +24,45 @@ export const getBotDecision = async (
       // Scenario A: Card is lower than all row ends (Must take a row)
       if (rowIndex === -1) {
         // Calculate the best case damage (taking the row with fewest heads)
-        const minRowHeads = Math.min(...rows.map(r => sumBullHeads(r.cards)));
+        const rowPenalties = rows.map(r => sumBullHeads(r.cards));
+        const minRowHeads = Math.min(...rowPenalties);
         
-        // Logic: If we MUST take a row, we prefer to do it with a very low card (1-15)
-        // to save our safe high cards for later. 
-        // High Score = Bad.
-        riskScore = 100 + minRowHeads; 
-        debugReason = "Must take row";
+        // Base risk is high because we take points
+        riskScore = 1000 + (minRowHeads * 10); 
+        debugReason = `Must take row (${minRowHeads} heads)`;
         
-        // Tie-breaker: If multiple cards must take a row, prefer the smallest one
-        // to keep larger cards that might fit later.
+        // Tie-breaker: If we MUST take a row, prefer using a smaller card 
+        // to get it out of the hand, as small cards are hard to play safely later.
         riskScore += (card.id / 1000); 
       } 
       // Scenario B: Card fits into a row
       else {
         const targetRow = rows[rowIndex];
-        const gap = card.id - targetRow.cards[targetRow.cards.length - 1].id;
+        const lastCard = targetRow.cards[targetRow.cards.length - 1];
+        const gap = card.id - lastCard.id;
         const cardsInRow = targetRow.cards.length;
 
-        // 1. Gap Risk: The larger the gap, the more likely an opponent plays in between.
-        // A gap of 1 is perfect (Risk 0). A gap of 20 is dangerous.
+        // 1. Gap Risk
+        // A gap of 1 is perfect (Risk 0). 
+        // A large gap allows opponents to squeeze in.
         riskScore += gap; 
 
         // 2. Row Fullness Risk
         if (cardsInRow === 5) {
           // This makes it the 6th card! Guaranteed capture!
           const rowHeads = sumBullHeads(targetRow.cards);
-          riskScore = 500 + rowHeads; // Extremely bad, unless taking row is better than option A
+          riskScore += 5000 + (rowHeads * 10); // Extremely bad
           debugReason = "Triggers 6th card take";
         } else if (cardsInRow === 4) {
-          // This makes it the 5th card. Very risky for the NEXT round/player, 
-          // but safe for me NOW... unless someone undercuts me this turn?
-          // If gap is small (1-2), it's safe. If gap is big, someone might take the spot.
-          // We add a slight penalty to avoid setting up others unless necessary.
-          riskScore += 5; 
-          debugReason = "Sets up 5th card";
+          // This makes it the 5th card. 
+          // High Gap + Row Length 4 = DANGER.
+          if (gap > 5) {
+             riskScore += 200; // Danger zone
+             debugReason = `Risky 5th spot (Gap ${gap})`;
+          } else {
+             riskScore += 5; // Safe 5th spot
+             debugReason = "Safe 5th spot";
+          }
         } else {
           // Rows with 1, 2, 3 cards are generally safe.
           debugReason = `Gap ${gap}`;
@@ -70,7 +75,6 @@ export const getBotDecision = async (
     // Sort by lowest risk score
     scoredCards.sort((a, b) => a.score - b.score);
 
-    // console.log(`Bot ${bot.name} thinking:`, scoredCards.slice(0, 3));
     return scoredCards[0].card;
   };
 
@@ -97,10 +101,10 @@ export const getBotDecision = async (
       Strategic Priorities:
       1. GAP ANALYSIS: Find the card with the smallest difference to a row's end number. A gap of 1 is unbeatable. Large gaps allow opponents to play underneath you.
       2. AVOID THE 6TH CARD: A row with 5 cards is a trap. Do not play the 6th card unless you have no choice.
-      3. DANGER ZONE: A row with 4 cards is risky. Only play there if your gap is tiny (1-3).
+      3. CRITICAL DANGER: If a row has 4 cards, only play there if your gap is tiny (1-3). If the gap is large, an opponent might undercut you, forcing you to be the 6th card.
       4. DAMAGE CONTROL: If you MUST take a row (card too low or 6th card), play your LOWEST valued card to save safer cards for later, or play a card that takes a row with very few bull heads.
 
-      Based on these probabilities, select the single best card ID to play.
+      Based on these priorities, select the single best card ID to play.
     `;
 
     const response = await ai.models.generateContent({
@@ -127,7 +131,6 @@ export const getBotDecision = async (
     return advancedHeuristicLogic();
 
   } catch (error) {
-    // console.error("AI Bot Error, using heuristic:", error);
     return advancedHeuristicLogic();
   }
 };
