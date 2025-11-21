@@ -246,8 +246,9 @@ const App: React.FC = () => {
       // Add humans
       for (let i = 0; i < humans; i++) {
         newPlayers.push({
-          id: `human-${i}`,
-          name: i === 0 ? 'Player 1' : `Player ${i+1}`,
+          // FIX: Assign myPlayerId to the first human so the UI recognizes "Me"
+          id: i === 0 ? myPlayerId : `human-${i}`,
+          name: i === 0 ? (hostName || 'Player 1') : `Player ${i+1}`,
           type: PlayerType.HUMAN,
           hand: [],
           collectedCards: [],
@@ -1093,7 +1094,7 @@ const App: React.FC = () => {
          </div>
 
          {/* Player Hand Area */}
-         <div className="mt-auto bg-slate-900/80 border-t border-slate-800 pt-8 pb-4 sm:pb-8 px-2 sm:px-4 backdrop-blur-md relative z-30">
+         <div className="mt-auto bg-slate-900/80 border-t border-slate-800 pt-10 pb-4 sm:pb-8 px-2 sm:px-4 backdrop-blur-md relative z-30">
             
             {/* Confirm Selection Overlay */}
             {myPlayer?.selectedCard && !myPlayer.isReady && phase === GamePhase.PLAYER_CHOICE && (
