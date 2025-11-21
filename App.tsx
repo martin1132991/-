@@ -154,6 +154,12 @@ function App() {
       inputPlayers: Player[] = players, 
       config = hostConfig
   ) => {
+    // GUARD: Prevent starting a round if one is already in progress
+    if (phase !== GamePhase.LOBBY && phase !== GamePhase.ROUND_VOTING && phase !== GamePhase.GAME_END) {
+       console.warn("Attempted to start round while game is active");
+       return;
+    }
+
     let currentPlayers = [...inputPlayers];
     const totalNeeded = config.totalPlayers;
     
@@ -516,6 +522,8 @@ function App() {
   const handleSendReaction = (content: string, type: 'text' | 'emoji') => {
     if (!myPlayerId) return;
     
+    setChatInput(""); // Clear input
+    
     const newMsg: ChatMessage = {
       id: Math.random().toString(),
       playerId: myPlayerId,
@@ -542,7 +550,6 @@ function App() {
   const handleSendChat = () => {
       if (!chatInput.trim()) return;
       handleSendReaction(chatInput, 'text');
-      setChatInput('');
   };
 
   // --- Timer Enforcement (Host Only) ---
@@ -578,8 +585,26 @@ function App() {
                 });
             } 
             else if (currentPhase === GamePhase.CHOOSING_ROW) {
-                const randomRowIndex = Math.floor(Math.random() * 4);
-                handleRowSelect(randomRowIndex);
+                // AUTO SELECT SMALLEST HEAD ROW
+                const curRows = gameStateRef.current.rows;
+                let minHeads = Infinity;
+                let bestRowIndex = 0;
+                
+                curRows.forEach((row, idx) => {
+                    const heads = sumBullHeads(row.cards);
+                    if (heads < minHeads) {
+                        minHeads = heads;
+                        bestRowIndex = idx;
+                    }
+                });
+                
+                handleRowSelect(
+                    bestRowIndex, 
+                    gameStateRef.current.players, 
+                    gameStateRef.current.rows, 
+                    gameStateRef.current.turnCards, 
+                    gameStateRef.current.resolvingIndex
+                );
             }
         }
     }, 1000);
