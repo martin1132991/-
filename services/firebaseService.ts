@@ -7,6 +7,7 @@ import { GameState, NetworkMessage } from '../types';
 const firebaseConfig = {
   apiKey: "AIzaSyAAV8Kk26femWNclxOmD-oxsPPT0sR-H94",
   authDomain: "cowcowking-30ca6.firebaseapp.com",
+  databaseURL: "https://cowcowking-30ca6-default-rtdb.firebaseio.com",
   projectId: "cowcowking-30ca6",
   storageBucket: "cowcowking-30ca6.firebasestorage.app",
   messagingSenderId: "814490629694",
@@ -25,22 +26,30 @@ export class FirebaseService {
 
   // Create a room with a random 4-digit ID
   async createRoom(): Promise<string> {
-    // Generate a random 4-digit room ID
-    const roomId = Math.floor(1000 + Math.random() * 9000).toString();
-    this.roomId = roomId;
+    try {
+      // Generate a random 4-digit room ID
+      const roomId = Math.floor(1000 + Math.random() * 9000).toString();
+      this.roomId = roomId;
 
-    // Clear any existing data for this room just in case
-    await set(ref(db, `rooms/${roomId}`), null);
-    
-    // Set initial existence
-    await set(ref(db, `rooms/${roomId}/created`), Date.now());
+      console.log(`Attempting to create room: ${roomId} at ${firebaseConfig.databaseURL}`);
 
-    return roomId;
+      // Clear any existing data for this room just in case
+      await set(ref(db, `rooms/${roomId}`), null);
+      
+      // Set initial existence
+      await set(ref(db, `rooms/${roomId}/created`), Date.now());
+      
+      console.log(`Room ${roomId} created successfully.`);
+      return roomId;
+    } catch (error) {
+      console.error("Firebase Create Room Error:", error);
+      throw error;
+    }
   }
 
   // Update the global game state (Host only)
   updateGameState(roomId: string, state: GameState) {
-    set(ref(db, `rooms/${roomId}/gameState`), state);
+    set(ref(db, `rooms/${roomId}/gameState`), state).catch(e => console.error("Update State Error:", e));
   }
 
   // Listen for actions from clients (Host only)
@@ -52,7 +61,7 @@ export class FirebaseService {
       if (val) {
         callback(val as NetworkMessage);
         // Remove the action after processing to keep the queue clean
-        remove(snapshot.ref); 
+        remove(snapshot.ref).catch(e => console.error("Remove Action Error:", e)); 
       }
     });
   }
@@ -61,13 +70,18 @@ export class FirebaseService {
 
   // Check if room exists
   async joinRoom(roomId: string): Promise<boolean> {
-    const roomRef = ref(db, `rooms/${roomId}`);
-    const snapshot = await get(roomRef);
-    if (snapshot.exists()) {
-      this.roomId = roomId;
-      return true;
+    try {
+      const roomRef = ref(db, `rooms/${roomId}`);
+      const snapshot = await get(roomRef);
+      if (snapshot.exists()) {
+        this.roomId = roomId;
+        return true;
+      }
+      return false;
+    } catch (error) {
+      console.error("Join Room Error:", error);
+      throw error;
     }
-    return false;
   }
 
   // Listen for game state updates (Client only)
@@ -84,7 +98,7 @@ export class FirebaseService {
   // Send an action to the host (Client only)
   sendAction(roomId: string, action: NetworkMessage) {
     const actionsRef = ref(db, `rooms/${roomId}/actions`);
-    push(actionsRef, action);
+    push(actionsRef, action).catch(e => console.error("Send Action Error:", e));
   }
 
   // --- CLEANUP ---
