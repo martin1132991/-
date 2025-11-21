@@ -53,6 +53,7 @@ function App() {
   
   // Refs for Logic Optimization
   const thinkingBotsRef = useRef<Set<string>>(new Set());
+  const isRoundStartingRef = useRef(false);
   
   // Reference to latest state for Event Handlers (to avoid dependency loops)
   const gameStateRef = useRef<GameState>({
@@ -95,6 +96,11 @@ function App() {
       hostConfigRef.current = hostConfig;
   }, [hostConfig]);
 
+  // Reset round lock when round changes
+  useEffect(() => {
+      isRoundStartingRef.current = false;
+  }, [currentRound]);
+
   // --- Game Logic ---
 
   const initGame = () => {
@@ -102,6 +108,7 @@ function App() {
     setPlayers([]);
     setNetworkMode(NetworkMode.LOCAL);
     thinkingBotsRef.current.clear();
+    isRoundStartingRef.current = false;
   };
 
   useEffect(() => {
@@ -532,6 +539,12 @@ function App() {
     }
   };
 
+  const handleSendChat = () => {
+      if (!chatInput.trim()) return;
+      handleSendReaction(chatInput, 'text');
+      setChatInput('');
+  };
+
   // --- Timer Enforcement (Host Only) ---
   useEffect(() => {
     if (networkMode === NetworkMode.CLIENT) return; 
@@ -660,7 +673,9 @@ function App() {
 
                    // ALL YES -> NEXT ROUND
                    const humans = cur.players.filter(p => p.type === PlayerType.HUMAN);
-                   if (humans.every(h => newVotes[h.id] === true)) {
+                   // Guard against double activation
+                   if (humans.every(h => newVotes[h.id] === true) && !isRoundStartingRef.current) {
+                       isRoundStartingRef.current = true; // Lock
                        setCurrentRound(r => r + 1);
                        // PASS FRESH PLAYERS AND CONFIG to avoid resetting to initial state
                        startRound(cur.players, curConfig);
@@ -954,7 +969,7 @@ function App() {
        {/* Header */}
        <header className="h-14 sm:h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-4 z-20 relative">
           <div className="flex items-center gap-2 sm:gap-4">
-             <div className="text-yellow-500 font-black text-xl tracking-tighter hidden sm:block">牛頭王 - 遠離賭博</div>
+             <div className="text-yellow-500 font-black text-lg sm:text-xl tracking-tighter block">牛頭王 - 遠離賭博</div>
              <div className="bg-slate-800 px-3 py-1 rounded-full text-xs font-mono text-slate-400 border border-slate-700 flex items-center gap-2">
                 <span>R {currentRound}</span>
                 {turnDeadline === 0 && phase === GamePhase.PLAYER_CHOICE && (
@@ -1068,10 +1083,10 @@ function App() {
                                           placeholder="Say something..."
                                           value={chatInput}
                                           onChange={e => setChatInput(e.target.value)}
-                                          onKeyDown={e => e.key === 'Enter' && handleSendReaction(chatInput, 'text')}
+                                          onKeyDown={e => e.key === 'Enter' && handleSendChat()}
                                        />
                                        <button 
-                                         onClick={() => handleSendReaction(chatInput, 'text')}
+                                         onClick={handleSendChat}
                                          disabled={!chatInput.trim()}
                                          className="p-2 bg-blue-600 hover:bg-blue-500 rounded text-white disabled:opacity-50"
                                        >
@@ -1090,17 +1105,23 @@ function App() {
                    </div>
                 </div>
                 
-                <div className="flex justify-center gap-[-10px] sm:gap-2 overflow-x-auto py-2 px-4 -ml-12 no-scrollbar mask-fade-sides min-h-[120px]">
+                {/* MOBILE OPTIMIZED CARD CONTAINER */}
+                <div className="flex justify-center items-end w-full px-2 h-32 sm:h-40 overflow-visible">
+                   <div className="flex items-end justify-center pl-14 sm:pl-12"> 
+                   {/* Padding left compensates for negative margin of first card effectively centering the stack */}
                    {myPlayer?.hand
                      // Filter out the selected card ONLY if the player is READY (confirmed)
                      .filter(card => !myPlayer.isReady || (myPlayer.selectedCard?.id !== card.id))
-                     .map((card) => (
+                     .map((card, index) => (
                       <div 
                         key={card.id} 
-                        className={`transform transition-all duration-200 
-                            ${myPlayer.selectedCard?.id === card.id ? '-translate-y-8 z-20 scale-110' : 'hover:-translate-y-4 hover:z-10 hover:scale-105'}
+                        className={`
+                            relative transition-all duration-300 w-20 sm:w-24 -ml-14 sm:-ml-12 
+                            hover:-translate-y-6 hover:z-50 hover:scale-105 cursor-pointer
+                            ${myPlayer.selectedCard?.id === card.id ? '-translate-y-10 z-40 ring-2 ring-emerald-400 rounded-lg' : ''}
                             ${phase !== GamePhase.PLAYER_CHOICE ? 'opacity-50 grayscale cursor-not-allowed' : ''}
                         `}
+                        style={{ zIndex: index }}
                       >
                          <Card 
                            id={card.id} 
@@ -1108,11 +1129,13 @@ function App() {
                            onClick={() => handleCardSelect(card)}
                            selected={myPlayer.selectedCard?.id === card.id}
                            disabled={phase !== GamePhase.PLAYER_CHOICE}
+                           small={false}
                          />
                       </div>
                    ))}
+                   </div>
                    {(!myPlayer?.hand || myPlayer.hand.length === 0) && (
-                      <div className="text-slate-600 text-sm italic py-8 w-full text-center ml-12">
+                      <div className="text-slate-600 text-sm italic py-8 w-full text-center">
                          {phase === GamePhase.LOBBY ? 'Waiting to start...' : 'No cards left'}
                       </div>
                    )}
