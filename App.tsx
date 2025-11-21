@@ -24,14 +24,14 @@ import { audioService } from './services/audioService';
 import GameBoard from './components/GameBoard';
 import Card from './components/Card';
 import ScoreBoard from './components/ScoreBoard';
-import { Users, Bot, Play, RotateCcw, Volume2, VolumeX, Loader2, CheckCircle2, XCircle, AlertTriangle, MessageSquare, Send } from 'lucide-react';
+import { Users, Bot, Play, RotateCcw, Volume2, VolumeX, Loader2, CheckCircle2, XCircle, AlertTriangle, MessageSquare, Send, Clock } from 'lucide-react';
 
 const DEFAULT_CONFIG: GameConfig = {
   maxRounds: 10, // Not strictly used with voting logic
   totalPlayers: 4
 };
 
-const PRESET_EMOJIS = ["👍", "👎", "😂", "😭", "😡", "🐮", "⚡", "💀", "🎉", "🤔"];
+const PRESET_REACTIONS = ["👍", "👎", "😂", "😭", "😡", "🐮", "⚡", "💀", "🎉", "🤔", "GG", "Nice!", "Ouch", "Speed!", "OMG"];
 
 const App: React.FC = () => {
   // --- Game State ---
@@ -48,20 +48,26 @@ const App: React.FC = () => {
   const [turnCards, setTurnCards] = useState<{playerId: string, card: CardData}[]>([]);
   const [resolvingIndex, setResolvingIndex] = useState<number>(-1);
   const lastProcessedIndexRef = useRef<number>(-1); // Prevent double-processing in useEffect
-  
+  const [turnDeadline, setTurnDeadline] = useState<number>(0); // Timestamp for turn end
+
   // UI State
   const [isScoreBoardOpen, setIsScoreBoardOpen] = useState<boolean>(false);
   const [takingRowIndex, setTakingRowIndex] = useState<number>(-1); // -1 means no animation
   const [votes, setVotes] = useState<Record<string, boolean>>({}); // For voting next round
   const [isChatOpen, setIsChatOpen] = useState<boolean>(false);
   const [chatInput, setChatInput] = useState<string>("");
+  const [timeLeft, setTimeLeft] = useState<number>(0); // Local visual countdown
 
   // Audio State
   const [isMuted, setIsMuted] = useState<boolean>(false);
 
   // --- Networking State ---
   const [networkMode, setNetworkMode] = useState<NetworkMode>(NetworkMode.LOCAL);
-  const [myPlayerId, setMyPlayerId] = useState<string>('');
+  // Persist Player ID
+  const [myPlayerId, setMyPlayerId] = useState<string>(() => {
+    const saved = localStorage.getItem('cowking_player_id');
+    return saved || Math.random().toString(36).substr(2, 9);
+  });
   const [roomId, setRoomId] = useState<string>('');
   const [joinRoomIdInput, setJoinRoomIdInput] = useState<string>('');
   const [hostName, setHostName] = useState<string>('Host');
@@ -72,11 +78,10 @@ const App: React.FC = () => {
   // Reaction Cleanup Refs
   const reactionTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
-  // Initialize Audio & ID on mount
+  // Save ID on change
   useEffect(() => {
-    const id = Math.random().toString(36).substr(2, 9);
-    setMyPlayerId(id);
-  }, []);
+    localStorage.setItem('cowking_player_id', myPlayerId);
+  }, [myPlayerId]);
 
   // Toggle Mute
   const toggleMute = () => {
@@ -144,6 +149,7 @@ const App: React.FC = () => {
           setUserMessage(state.userMessage || "");
           setVotes(state.votes || {});
           setTakingRowIndex(state.takingRowIndex ?? -1); // Sync animation state
+          setTurnDeadline(state.turnDeadline || 0);
         }
       });
 
@@ -217,11 +223,12 @@ const App: React.FC = () => {
         resolvingIndex,
         userMessage,
         votes,
-        takingRowIndex
+        takingRowIndex,
+        turnDeadline
       };
       firebaseService.updateGameState(roomId, state);
     }
-  }, [players, rows, phase, currentRound, turnCards, resolvingIndex, userMessage, votes, takingRowIndex, networkMode, roomId]);
+  }, [players, rows, phase, currentRound, turnCards, resolvingIndex, userMessage, votes, takingRowIndex, turnDeadline, networkMode, roomId]);
 
 
   // --- Game Loop Logic (Host) ---
@@ -322,9 +329,60 @@ const App: React.FC = () => {
 
     setTimeout(() => {
       setPhase(GamePhase.PLAYER_CHOICE);
+      setTurnDeadline(Date.now() + 20000); // 20s timer
       triggerBotTurns(updatedPlayers, newRows);
     }, 1000);
   };
+
+  // --- Host Timer Logic ---
+  useEffect(() => {
+    if (networkMode === NetworkMode.CLIENT) return;
+    if (phase !== GamePhase.PLAYER_CHOICE) return;
+    if (turnDeadline === 0) return;
+
+    const interval = setInterval(() => {
+      if (Date.now() > turnDeadline) {
+        // Time is up! Force random selection for AFK players
+        setPlayers(prev => {
+          let changed = false;
+          const newPlayers = prev.map(p => {
+            if (p.selectedCard === null) {
+              changed = true;
+              const randomCard = p.hand[Math.floor(Math.random() * p.hand.length)];
+              return { ...p, selectedCard: randomCard, isReady: true };
+            }
+            return p;
+          });
+          
+          if (changed) {
+            audioService.playAlert();
+            setUserMessage("Time's up! Random cards selected.");
+          }
+          return changed ? newPlayers : prev;
+        });
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [phase, turnDeadline, networkMode]);
+
+  // --- Client Visual Timer ---
+  useEffect(() => {
+    if (phase !== GamePhase.PLAYER_CHOICE || turnDeadline === 0) {
+      setTimeLeft(0);
+      return;
+    }
+    
+    const updateTimer = () => {
+      const delta = Math.ceil((turnDeadline - Date.now()) / 1000);
+      setTimeLeft(Math.max(0, delta));
+    };
+
+    updateTimer(); // Immediate update
+    const interval = setInterval(updateTimer, 500); // Update frequently for smooth countdown
+    return () => clearInterval(interval);
+  }, [turnDeadline, phase]);
+
 
   const triggerBotTurns = (currentPlayers: Player[], currentRows: GameRow[]) => {
     currentPlayers.forEach(player => {
@@ -339,7 +397,7 @@ const App: React.FC = () => {
              }
              return p;
           }));
-        }, 1000 + Math.random() * 2000);
+        }, 1000 + Math.random() * 10000); // Bot moves within 1-10s, well within 20s limit
       }
     });
   };
@@ -440,6 +498,7 @@ const App: React.FC = () => {
 
   const startRevealPhase = () => {
     setPhase(GamePhase.REVEAL);
+    setTurnDeadline(0); // Stop timer
     lastProcessedIndexRef.current = -1;
     audioService.playFanfare();
 
@@ -539,6 +598,12 @@ const App: React.FC = () => {
     // Set visual state for all clients
     setTakingRowIndex(rowIndex);
     audioService.playTakeRow();
+    
+    // ADDED: Distinct message for clarity during the animation
+    const player = players.find(p => p.id === playerId);
+    if (player) {
+      setUserMessage(`${player.name} takes Row ${rowIndex + 1}!`);
+    }
 
     // Delay actual state update to allow animation
     setTimeout(() => {
@@ -605,6 +670,7 @@ const App: React.FC = () => {
       setPhase(GamePhase.PLAYER_CHOICE);
       setResolvingIndex(-1);
       setTurnCards([]);
+      setTurnDeadline(Date.now() + 20000); // Reset timer for next turn
       // Trigger bots for next turn
       triggerBotTurns(players, rows);
     }
@@ -625,6 +691,7 @@ const App: React.FC = () => {
     setIsScoreBoardOpen(true);
     setPhase(GamePhase.ROUND_VOTING); // Enter Voting Phase
     setVotes({});
+    setTurnDeadline(0); // Stop timer
   };
 
   const handleVote = (playerId: string, vote: boolean) => {
@@ -715,16 +782,13 @@ const App: React.FC = () => {
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm text-slate-400 mb-1">Bots</label>
+                    <label className="block text-sm text-slate-400 mb-1">Humans</label>
                     <select 
-                      value={config.totalPlayers - numHumans} 
-                      onChange={(e) => {
-                        const bots = Number(e.target.value);
-                        setNumHumans(config.totalPlayers - bots);
-                      }}
+                      value={numHumans} 
+                      onChange={(e) => setNumHumans(Number(e.target.value))}
                       className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2"
                     >
-                      {Array.from({length: config.totalPlayers}, (_, i) => i).map(n => (
+                      {Array.from({length: config.totalPlayers}, (_, i) => i + 1).map(n => (
                         <option key={n} value={n}>{n}</option>
                       ))}
                     </select>
@@ -732,7 +796,7 @@ const App: React.FC = () => {
                 </div>
 
                 <div className="text-sm text-slate-500 flex items-center gap-2">
-                  <Users size={16} /> Humans: {numHumans}
+                  <Bot size={16} /> Bots: {config.totalPlayers - numHumans}
                 </div>
 
                 <div className="flex gap-2 pt-4">
@@ -826,7 +890,7 @@ const App: React.FC = () => {
 
           <button 
             onClick={startGame}
-            disabled={players.length < 2} // Allow starting with bots
+            // disabled={players.length < 2} // Removed as per request to allow solo testing with bots
             className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 text-white font-bold py-4 rounded-xl transition-all text-xl"
           >
             Start Game
@@ -859,6 +923,19 @@ const App: React.FC = () => {
           </div>
         </div>
 
+        {/* Timer Badge */}
+        {phase === GamePhase.PLAYER_CHOICE && timeLeft > 0 && (
+           <div className={`
+             flex items-center gap-2 px-4 py-1.5 rounded-full font-mono font-bold text-lg shadow-lg border transition-all
+             ${timeLeft <= 5 
+               ? 'bg-red-900/80 text-red-200 border-red-500 animate-pulse shadow-[0_0_15px_rgba(220,38,38,0.5)]' 
+               : 'bg-slate-800 text-white border-slate-600'}
+           `}>
+              <Clock size={20} className={timeLeft <= 5 ? 'animate-spin' : ''} />
+              {timeLeft}s
+           </div>
+        )}
+
         <div className="flex items-center gap-2 sm:gap-4">
            {/* Player Status Bar */}
            <div className="flex items-center gap-2 overflow-x-auto max-w-[200px] sm:max-w-md no-scrollbar">
@@ -877,8 +954,8 @@ const App: React.FC = () => {
 
                   {/* Chat Bubble Overlay */}
                   {p.lastReaction && (
-                    <div className="absolute -bottom-10 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-top-2 fade-in duration-200">
-                      <div className="bg-white text-slate-900 px-3 py-1.5 rounded-xl rounded-tr-none shadow-xl font-medium text-sm whitespace-nowrap border-2 border-slate-200 flex items-center justify-center min-w-[40px]">
+                    <div className="inline-block ml-1 z-50 animate-in fade-in duration-200">
+                      <div className="bg-white text-slate-900 px-2 py-0.5 rounded-md font-bold text-xs border border-slate-200">
                         {p.lastReaction.content}
                       </div>
                     </div>
@@ -972,12 +1049,12 @@ const App: React.FC = () => {
          <div className="absolute bottom-24 sm:bottom-32 right-4 z-50">
             {isChatOpen && (
                <div className="absolute bottom-14 right-0 w-64 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl p-3 animate-in slide-in-from-bottom-5 fade-in">
-                  <div className="grid grid-cols-5 gap-2 mb-3">
-                    {PRESET_EMOJIS.map(emoji => (
+                  <div className="grid grid-cols-3 gap-2 mb-3 h-48 overflow-y-auto no-scrollbar">
+                    {PRESET_REACTIONS.map(emoji => (
                       <button
                         key={emoji}
                         onClick={() => handleSendReaction(emoji, 'emoji')}
-                        className="text-xl hover:bg-slate-700 p-1 rounded transition-colors"
+                        className="text-sm hover:bg-slate-700 p-2 rounded transition-colors bg-slate-900 border border-slate-700"
                       >
                         {emoji}
                       </button>
@@ -1048,11 +1125,11 @@ const App: React.FC = () => {
 
             {/* Hand Scroll Container */}
             <div className="flex justify-center overflow-x-auto no-scrollbar pb-4 pt-4 min-h-[160px]">
-              <div className="flex gap-[-40px] sm:gap-2 px-4 min-w-max">
+              <div className="flex -space-x-12 px-12 min-w-max">
                 {myHand.map((card) => (
                   <div 
                     key={card.id} 
-                    className={`transform transition-all duration-300 hover:z-10 ${myPlayer?.selectedCard?.id === card.id ? '-translate-y-6 z-10' : 'hover:-translate-y-4'}`}
+                    className={`transform transition-all duration-300 hover:z-10 hover:-translate-y-4 ${myPlayer?.selectedCard?.id === card.id ? '-translate-y-6 z-20' : ''}`}
                   >
                     <Card 
                       id={card.id} 

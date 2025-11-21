@@ -72,6 +72,7 @@ export interface GameState {
   userMessage: string;
   votes: Record<string, boolean>;
   takingRowIndex: number; // Index of the row currently being captured (animation state)
+  turnDeadline: number; // Timestamp for when the turn ends
 }
 
 export type NetworkMessage = 

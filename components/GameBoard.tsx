@@ -153,7 +153,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
               {/* Cards in Row */}
               <div className="flex flex-wrap gap-1 sm:gap-2 pl-3 sm:pl-4">
                 {row.cards.map((card, cIdx) => (
-                  <div key={card.id} className={`${isBeingTaken ? 'animate-shake opacity-50' : ''}`}>
+                  <div key={card.id} className={`${isBeingTaken ? 'animate-pulse scale-95 brightness-75 transition-all' : ''}`}>
                     <Card 
                       id={card.id} 
                       bullHeads={card.bullHeads} 
@@ -169,7 +169,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
                  <div className="absolute inset-0 flex items-center justify-center z-30 bg-black/20 backdrop-blur-[2px] rounded-lg">
                     <div className="bg-red-600 text-white font-black text-lg sm:text-2xl px-6 py-2 rounded-full shadow-2xl animate-bounce flex items-center gap-2 border-4 border-red-400">
                       <Skull size={28} /> 
-                      {takerName} TAKING...
+                      {takerName} TAKING ROW {idx + 1}
                     </div>
                  </div>
               )}
