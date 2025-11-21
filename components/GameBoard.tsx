@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { CardData, GameRow, GamePhase, Player } from '../types';
 import Card from './Card';
@@ -66,8 +65,8 @@ const GameBoard: React.FC<GameBoardProps> = ({
       
       {/* STAGING AREA: Player Status / Cards */}
       {showStaging && (
-        <div className="mb-4 sm:mb-6 min-h-[120px] sm:min-h-[160px] flex justify-center items-center perspective-1000 shrink-0">
-          <div className="flex flex-wrap justify-center gap-2 sm:gap-4 w-full px-2">
+        <div className="mb-4 sm:mb-6 min-h-[80px] sm:min-h-[160px] flex justify-center items-center perspective-1000 shrink-0">
+          <div className="flex flex-wrap justify-center gap-1 sm:gap-4 w-full px-1">
             {/* CHOICE PHASE: Show all players status (Thinking/Ready) */}
             {phase === GamePhase.PLAYER_CHOICE ? (
                players && players.map(player => {
@@ -76,7 +75,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
                  
                  return (
                    <div key={player.id} className="flex flex-col items-center relative animate-in fade-in">
-                     <div className="relative scale-75 sm:scale-90 origin-bottom">
+                     <div className="relative scale-100 sm:scale-90 origin-bottom">
                         {isReady ? (
                           // Ready: Show Card (Face Up if me, Face Down if other)
                           <div className="relative">
@@ -84,21 +83,22 @@ const GameBoard: React.FC<GameBoardProps> = ({
                                id={player.selectedCard?.id || 0} 
                                bullHeads={player.selectedCard?.bullHeads || 0} 
                                revealed={!!isLocal} // Reveal only if local
+                               tiny={true}
                              />
                              {!isLocal && (
                                <div className="absolute -top-2 -right-2 bg-emerald-500 text-white rounded-full p-1 shadow-lg animate-in zoom-in">
-                                   <CheckCircle2 size={14} />
+                                   <CheckCircle2 size={12} />
                                </div>
                              )}
                           </div>
                         ) : (
                           // Not Ready: Empty Slot
-                          <div className="w-20 h-28 sm:w-24 sm:h-36 rounded-lg border-2 border-dashed border-slate-600 bg-slate-800/50 flex items-center justify-center">
-                             <Loader className="animate-spin text-slate-500" size={20} />
+                          <div className="w-10 h-14 sm:w-24 sm:h-36 rounded-lg border-2 border-dashed border-slate-600 bg-slate-800/50 flex items-center justify-center">
+                             <Loader className="animate-spin text-slate-500" size={16} />
                           </div>
                         )}
                      </div>
-                     <span className={`mt-1 text-xs font-bold px-2 py-0.5 rounded-full max-w-[80px] truncate
+                     <span className={`mt-1 text-[10px] sm:text-xs font-bold px-1.5 py-0.5 rounded-full max-w-[42px] sm:max-w-[80px] truncate
                        ${isReady ? 'bg-slate-700 text-emerald-400' : 'bg-slate-800 text-slate-500'}
                      `}>
                        {player.name}
@@ -120,30 +120,28 @@ const GameBoard: React.FC<GameBoardProps> = ({
                   if (phase === GamePhase.RESOLVING && isDone) return null;
 
                   let transformStyle = {};
-                  // Note: Logic to fly card to row is complex in React without a dedicated animation library.
-                  // We simulate it by hiding it here and showing it in the row (logic in processNextTurn).
-                  // But for visual flair, we fade it out or scale it.
-
+                  
                   return (
                      <div 
                       key={turn.card.id} 
                       className="flex flex-col items-center transition-all duration-500 relative animate-in fade-in"
                       style={transformStyle}
                      >
-                       <div className={`relative transition-transform duration-300 ${isResolving ? 'scale-110 z-20 ring-4 ring-yellow-400 rounded-lg shadow-[0_0_20px_rgba(250,204,21,0.5)]' : 'scale-75 sm:scale-90 opacity-80'}`}>
+                       <div className={`relative transition-transform duration-300 ${isResolving ? 'scale-125 sm:scale-110 z-20 ring-2 sm:ring-4 ring-yellow-400 rounded-lg shadow-[0_0_20px_rgba(250,204,21,0.5)]' : 'scale-100 sm:scale-90 opacity-80'}`}>
                           <Card 
                             id={turn.card.id} 
                             bullHeads={turn.card.bullHeads} 
                             revealed={true} // Always revealed in this phase
                             selected={isResolving}
+                            tiny={true}
                           />
                           {isResolving && (
-                            <div className="absolute -top-8 left-1/2 -translate-x-1/2 animate-bounce text-yellow-400">
-                              <ArrowDown size={24} fill="currentColor" />
+                            <div className="absolute -top-6 sm:-top-8 left-1/2 -translate-x-1/2 animate-bounce text-yellow-400">
+                              <ArrowDown size={16} className="sm:w-6 sm:h-6" fill="currentColor" />
                             </div>
                           )}
                        </div>
-                       <span className={`mt-1 text-xs font-bold px-2 py-0.5 rounded-full max-w-[80px] truncate
+                       <span className={`mt-1 text-[10px] sm:text-xs font-bold px-1.5 py-0.5 rounded-full max-w-[42px] sm:max-w-[80px] truncate
                          ${isResolving ? 'bg-yellow-500 text-black' : 'bg-slate-700 text-slate-300'}
                        `}>
                          {player?.name || '???'}
@@ -173,7 +171,7 @@ const GameBoard: React.FC<GameBoardProps> = ({
             <div 
               key={idx} 
               className={`
-                relative flex items-center p-2 sm:p-3 rounded-lg transition-all duration-500 min-h-[100px] sm:min-h-[120px]
+                relative flex items-center p-2 sm:p-3 rounded-lg transition-all duration-500 min-h-[80px] sm:min-h-[120px]
                 ${isBeingTaken 
                   ? 'bg-red-900/80 border-4 border-red-500 scale-[1.02] shadow-[0_0_30px_rgba(239,68,68,0.6)] z-10' 
                   : canInteract 

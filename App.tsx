@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Player, CardData, GameRow, GamePhase, NetworkMode, 
@@ -1021,7 +1020,7 @@ function App() {
        <header className="h-14 sm:h-16 bg-slate-900 border-b border-slate-800 flex items-center justify-between px-4 z-20 shrink-0 relative">
           <div className="flex items-center gap-2 sm:gap-4">
              <div className="text-yellow-500 font-black text-lg sm:text-xl tracking-tighter block">牛頭王 - 遠離賭博</div>
-             <div className="bg-slate-800 px-3 py-1 rounded-full text-xs font-mono text-slate-400 border border-slate-700 flex items-center gap-2">
+             <div className="bg-slate-800 px-2 py-0.5 rounded-full text-[10px] sm:text-xs font-mono text-slate-400 border border-slate-700 flex items-center gap-2">
                 <span>R {currentRound}</span>
                 {turnDeadline === 0 && phase === GamePhase.PLAYER_CHOICE && (
                     <span className="text-blue-400 flex items-center gap-1 font-bold"><Clock size={12}/> ∞</span>
@@ -1047,22 +1046,22 @@ function App() {
              </button>
           </div>
           
-          {/* BIG TIMER (Positioned Top Left) */}
+          {/* BIG TIMER (Positioned Top Center on Mobile, Top Left on Desktop) */}
           {turnDeadline > 0 && (phase === GamePhase.PLAYER_CHOICE || phase === GamePhase.CHOOSING_ROW) && (
-              <div className="absolute top-16 left-4 z-40 pointer-events-none">
+              <div className="absolute top-14 left-1/2 -translate-x-1/2 sm:top-16 sm:left-4 sm:translate-x-0 z-50 pointer-events-none">
                  <div className={`
-                    flex flex-col items-center justify-center px-6 py-2 rounded-xl shadow-2xl border-2 backdrop-blur-xl transition-all duration-300
+                    flex flex-col items-center justify-center px-4 py-1 sm:px-6 sm:py-2 rounded-xl shadow-2xl border-2 backdrop-blur-xl transition-all duration-300
                     ${timeLeft < 5 
                         ? 'bg-red-600/90 border-red-400 text-white animate-pulse scale-110' 
                         : 'bg-slate-900/90 border-emerald-500 text-emerald-400'}
                  `}>
                     <div className="flex items-center gap-2">
-                        <AlarmClock size={24} className={timeLeft < 5 ? 'animate-bounce' : ''} />
-                        <span className="text-3xl font-black font-mono tracking-widest filter drop-shadow-lg">
+                        <AlarmClock className={`w-4 h-4 sm:w-6 sm:h-6 ${timeLeft < 5 ? 'animate-bounce' : ''}`} />
+                        <span className="text-lg sm:text-3xl font-black font-mono tracking-widest filter drop-shadow-lg">
                             {timeLeft}s
                         </span>
                     </div>
-                    <span className="text-[10px] font-bold uppercase tracking-wider opacity-80">
+                    <span className="text-[8px] sm:text-[10px] font-bold uppercase tracking-wider opacity-80">
                         {phase === GamePhase.CHOOSING_ROW ? 'Pick Row!' : 'Pick Card'}
                     </span>
                  </div>
@@ -1162,8 +1161,8 @@ function App() {
                 </div>
                 
                 {/* MOBILE OPTIMIZED CARD CONTAINER */}
-                <div className="flex justify-center items-end w-full px-2 h-32 sm:h-40 overflow-visible">
-                   <div className="flex items-end justify-center pl-14 sm:pl-12"> 
+                <div className="flex justify-center items-end w-full px-2 h-24 sm:h-40 overflow-visible">
+                   <div className="flex items-end justify-center pl-10 sm:pl-12"> 
                    {/* Padding left compensates for negative margin of first card effectively centering the stack */}
                    {myPlayer?.hand
                      // Filter out the selected card ONLY if the player is READY (confirmed)
@@ -1172,7 +1171,7 @@ function App() {
                       <div 
                         key={card.id} 
                         className={`
-                            relative transition-all duration-300 w-20 sm:w-24 -ml-14 sm:-ml-12 
+                            relative transition-all duration-300 w-14 sm:w-24 -ml-10 sm:-ml-12 
                             hover:-translate-y-6 hover:z-50 hover:scale-105 cursor-pointer
                             ${myPlayer.selectedCard?.id === card.id ? '-translate-y-10 z-40 ring-2 ring-emerald-400 rounded-lg' : ''}
                             ${phase !== GamePhase.PLAYER_CHOICE ? 'opacity-50 grayscale cursor-not-allowed' : ''}

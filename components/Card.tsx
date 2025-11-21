@@ -7,14 +7,14 @@ interface CardProps {
   selected?: boolean;
   revealed?: boolean; // If false, shows back of card
   small?: boolean; // For board rows
+  tiny?: boolean; // For staging area on mobile (fitting 8 in a row)
   disabled?: boolean;
+  className?: string; // Allow overriding classes
 }
 
 // Custom Bull Head Icon
-const BullHeadIcon: React.FC<{ size: number, className?: string }> = ({ size, className }) => (
+const BullHeadIcon: React.FC<{ className?: string }> = ({ className }) => (
   <svg 
-    width={size} 
-    height={size} 
     viewBox="0 0 24 24" 
     fill="currentColor" 
     className={className}
@@ -31,7 +31,9 @@ const Card: React.FC<CardProps> = ({
   selected, 
   revealed = true, 
   small = false, 
-  disabled = false
+  tiny = false,
+  disabled = false,
+  className = ''
 }) => {
   
   // Determine background color based on bull heads intensity
@@ -62,17 +64,31 @@ const Card: React.FC<CardProps> = ({
     rounded-lg border-2 shadow-md transition-all duration-200 select-none
     ${getBgColor()} ${getBorderColor()} 
     ${disabled ? 'opacity-50 cursor-not-allowed' : onClick ? 'cursor-pointer hover:-translate-y-1' : ''}
+    ${className}
   `;
 
-  const sizeClasses = small 
-    ? 'w-12 h-16 sm:w-14 sm:h-20 p-1 text-xs' 
-    : 'w-20 h-28 sm:w-24 sm:h-36 p-2 text-base sm:text-xl';
+  // Adjusted size classes
+  // Tiny: w-10 (40px) on mobile to fit 8 in a row. Stays large (w-24) on desktop.
+  // Small: w-12 (48px) on mobile for rows.
+  // Default: w-14 (56px) on mobile for hand.
+  const sizeClasses = tiny
+    ? 'w-10 h-14 sm:w-24 sm:h-36 p-0.5 sm:p-2 text-[10px] sm:text-xl'
+    : small 
+      ? 'w-12 h-16 sm:w-14 sm:h-20 p-1 text-xs' 
+      : 'w-14 h-20 sm:w-24 sm:h-36 p-1.5 sm:p-2 text-xs sm:text-xl';
+
+  // Responsive Icon Size
+  const iconSizeClass = tiny
+    ? 'w-2 h-2 sm:w-5 sm:h-5'
+    : small 
+      ? 'w-2.5 h-2.5' 
+      : 'w-3 h-3 sm:w-5 sm:h-5';
 
   if (!revealed) {
     return (
       <div className={`${baseClasses} ${sizeClasses} justify-center`}>
         <div className="w-full h-full rounded bg-indigo-800 border border-indigo-700 opacity-80 flex items-center justify-center">
-          <span className="text-indigo-400 font-bold text-2xl">?</span>
+          <span className={`text-indigo-400 font-bold ${tiny ? 'text-sm' : 'text-lg'} sm:text-2xl`}>?</span>
         </div>
       </div>
     );
@@ -86,10 +102,10 @@ const Card: React.FC<CardProps> = ({
       </div>
 
       {/* Center Visual (Heads) */}
-      <div className={`flex flex-wrap justify-center content-center gap-0.5 ${getHeadColor()}`}>
+      <div className={`flex flex-wrap justify-center content-center gap-px sm:gap-0.5 ${getHeadColor()} px-0.5`}>
         {/* Render bull heads visually based on count */}
         {Array.from({ length: Math.min(bullHeads, 7) }).map((_, i) => (
-           <BullHeadIcon key={i} size={small ? 10 : 18} className="opacity-90" />
+           <BullHeadIcon key={i} className={`${iconSizeClass} opacity-90`} />
         ))}
       </div>
 
